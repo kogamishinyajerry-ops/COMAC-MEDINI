@@ -14,6 +14,11 @@
 | 小模型穷举 | ✅ 已执行 | verification/reference_fta.py（独立真值表 oracle）；reference_importance.py（独立共因子 oracle） |
 | 随机/变形测试 | ✅ 已执行 | 210+60 随机模型交叉（结构）；120+40（rate 转换）；120（重要度，4072 项精确对照）；8 类变形不变量 |
 | **支持集双路判定** | ✅ 已执行 | 生产：图上"该层有节点"；参考：真值表仅差一位的行配对。274/509 事件命中"不在支持集" |
+| **存储无浮点审计** | ✅ 已执行 | 声明类型审计 + SQLite `typeof()` 逐值扫描（4501 值，零 REAL）；`store verify` 同法自检 |
+| **存储数值重推导** | ✅ 已执行 | verification/run_store_verification.py：raw sqlite3 读回，用 2ⁿ oracle 重算概率/割集/七项重要度，**精确相等无容差**（1362 项） |
+| **基线与 stale 独立重算** | ✅ 已执行 | 规范形式→SHA-256 独立重实现（53 份基线）；stale 由 `current_baseline_hash` 重算比对 |
+| **存储状态机属性** | ✅ 已执行 | 幂等/冲突/原子性/乐观并发/评审状态机/Agent 无批准权，7 类拒绝码实测触发 |
+| **验证自身有效性（突变测试）** | ✅ 已执行 | 9 种篡改（改数值/删行/改基线/翻 stale/加浮点列/存 REAL）**全部被检出** |
 | 第三方差分 | ❌ 未执行 | SCRAM 评估列为后续项（许可/GPL 审查先行） |
 | 专家 Gold Case | ❌ 未执行 | 需业务专家与脱敏模型（依赖启动会决策） |
 | 封存迁移任务 | ❌ 未执行 | 30 天范围 |
@@ -23,7 +28,7 @@
 
 ```text
 $ python -m pytest tests/ -q                     # venv Python 3.13.12 + pytest 9.1.1
-87 passed in 3.71s
+141 passed in 23.6s
 
 $ python verification/run_cross_check.py         # 结构：标准库 Python 3.13.12
 cross-check: 210/210 passed
@@ -48,9 +53,38 @@ importance cross-check: 120/120 models passed
     undefined measures hit     : 301
     zero-top-probability models: 13
 
+$ python verification/run_store_verification.py  # 存储：2^n oracle 重新推导库内数值
+mutation check (the checks above must be able to fail)
+  caught   9 / 9 tamperings
+store verification
+  population            : 14 fixed + 8 rate-derived runs
+  runs re-derived       : 52
+  events compared       : 202
+  importance values     : 1362 (exact, no tolerance)
+  undefined measures    : 52
+  exact rational texts  : 166 stored as n/d, 1196 as decimals
+  baselines re-hashed   : 53 (canonical form -> SHA-256, recomputed independently)
+  storage values scanned: 4501 (SQLite typeof — zero REAL expected)
+  superseded runs       : 7 (re-derived like any other run)
+  idempotent no-ops     : 1
+  refusals triggered    : APPROVAL_AUTHORITYx1, BASELINE_CONFLICTx4, BASELINE_NOT_CURRENTx1,
+                          REVIEW_NOT_FOUNDx2, REVIEW_STATEx3, RUN_ID_CONFLICTx1,
+                          STORE_SCHEMA_MISMATCHx1
+  population problems   : 0
+store verification: PASSED
+
 $ python run.py analyze examples/R01_rate_and.json --evidence-dir evidence --run-id r01_doc
 status: succeeded; model_schema 0.2.0; top_probability 1.997002664917588e-6; exit 0
   └ 证据包：manifest.json + inputs/ + results/ + reports/report.md + execution/
+
+$ python run.py analyze …M03… --db store.sqlite --run-id r1   → store.status=recorded;   exit 0
+$ python run.py analyze …M03… --db store.sqlite --run-id r1   → store.status=idempotent; exit 0
+$ python run.py analyze …M02… --db store.sqlite --run-id r1   → RUN_ID_CONFLICT;        exit 2
+$ python run.py store  verify store.sqlite                    → problems=[];            exit 0
+$ python run.py store  show   store.sqlite nope               → RUN_NOT_FOUND;         exit 2
+$ python run.py review propose … --reviewer agent             → 记 proposed；基线不动
+$ python run.py review decide  … --approve --reviewer agent   → APPROVAL_AUTHORITY;    exit 2
+$ python run.py review apply   … --reviewer JerryKogami       → applied；旧 run 标 stale
 
 $ python run.py validate <repairable:true>      → RATE_UNSUPPORTED; exit 3
 $ python run.py validate <模型 weibull>          → RATE_UNSUPPORTED; exit 3
@@ -81,6 +115,10 @@ $ python run.py validate <lambda_unit=1/s>       → RATE_UNITS;       exit 2
 | **120 重要度模型（含 rate 派生 1e-7 量级）** | — | 与 oracle **精确相等**（无容差，4072 项）✅ | — |
 | **支持集判定** | — | 与真值表差分判定 509/509 一致 ✅ | — |
 | 重要度性能压力（链式 n=1500） | — | 2.12s（关）→ 5.41s（开），恒等式对 1500 条记录全成立 ✅ | — |
+| **库内 52 次 run 的概率/割集/重要度** | — | 与 2ⁿ oracle 重推导值**精确相等**（1362 项，无容差）✅ | 同值 ✅ |
+| **库内 53 份基线规范形式** | — | 独立重哈希 == 主键（53/53）✅ | — |
+| **`Fraction(store(x)) == x`（M03 逐字段）** | — | 包括 `fussell_vesely="7/22"` 等非有限小数 ✅ | — |
+| **导出→恢复往返** | — | `dump(restore(dump)) == dump`，且副本再通过全部检查 ✅ | — |
 
 ## 失效率转换的独立性证据链
 
@@ -119,6 +157,49 @@ $ python run.py validate <lambda_unit=1/s>       → RATE_UNITS;       exit 2
 
 > 说明：生产侧内建的共因子恒等式校验（`Q = qᵢq+ᵢ+(1−qᵢ)q−ᵢ`）只是**自检**——它约束加权和，不单独约束 `q+ᵢ`、`q−ᵢ` 各自正确。真正排除"两者同时错但加权和凑巧正确"的是上面的独立穷举对照。
 
+## 存储层的独立性证据链
+
+存储的"正确性"不是"自己和自己一致"，而是"库里的每个数都能被另一条算法重新算出来"。验证脚本 `verification/run_store_verification.py` 因此**不导入 store 模块来读数据**，而是用 raw `sqlite3` 打开文件——这本身就证明了落盘格式可被第三方直接检视。
+
+| 检查维度 | 被测对象（`store/`） | 独立验证 |
+| --- | --- | --- |
+| 顶事件概率 | 结构化列（精确文本） | 由规范形式重建 0.1.0 模型 → `reference_fta.ref_solve` 2ⁿ 真值表穷举 |
+| 最小割集 | `cut_sets_json` | 同上 oracle 的独立割集枚举 |
+| 重要度七项 | `importance` 表九列 | `reference_importance.ref_importance` 逐事件钉死穷举 |
+| 支持集 | `in_support` 列 | 真值表仅差一位的行配对 |
+| 基线锚 | `baselines.baseline_hash` | **本文件内**重新实现规范化→SHA-256，与主键比对 |
+| stale | `runs.stale` | 由 `models.current_baseline_hash` 重算该派生量 |
+| 无浮点 | 结构化列 | 声明类型审计 + SQLite `typeof()` 逐值扫描 |
+| 载荷一致性 | `payload_json` 与结构化列 | 两份**独立序列化**逐条比对 |
+
+判据是**逐值精确相等、无任何容差**：库里没有超越函数，任何差异都是缺陷。
+
+### 突变测试：证明上面这些检查真的会失败
+
+绿灯只有在这个脚本"能红"的时候才有意义。因此每次运行都对一份副本施加 9 种篡改，要求全部被检出：
+
+| 篡改 | 被哪条检查抓住 |
+| --- | --- |
+| 改写一个已存重要度值（FV） | 与 oracle 精确比对 |
+| 改写一个已存 Birnbaum 值 | 与 oracle 精确比对 |
+| 改写已存顶事件概率 | 与 oracle 精确比对 |
+| 改写割集族 JSON | 与 oracle 比对割集 |
+| 翻转 stale 标记 | stale 派生量重算 |
+| 删除一行重要度 | 行数 vs `variable_count` + oracle |
+| 就地改写基线规范形式 | 规范形式→哈希重算不匹配 |
+| 在 schema 中加一个 REAL 列 | 声明类型审计 |
+| 存入一个 REAL 值（BLOB 亲和列，无强转） | `typeof()` 逐值扫描 |
+
+实测 **9/9 全部检出**。任何一条"未被检出"都会被脚本判为失败——因为那意味着对应的检查是装饰性的。
+
+### 覆盖度（说明存储验证的绿不是空绿）
+
+52 次 run 重推导、202 个事件、1362 个重要度值精确比对、52 个未定义度量、53 份基线重哈希、4501 个值做存储类扫描；其中 **166 个值真的以 `n/d` 有理数形式落盘**（FV/RAW/RRW 通常是概率之比，必然非有限小数）——若存储层偷偷用了浮点，这 166 个值不会以有理数文本存在。7 个 run 位于已被取代的基线上（stale 路径被真实覆盖），7 类拒绝码被实际触发。
+
+### 一个由测试抓出的真实缺陷
+
+`store.verify()` 最初只在"某 run 一条重要度行都没有"时报错。测试用例 `test_verify_detects_corruption[DELETE FROM importance …]` 删掉**一行**（还剩两行）时，剩余行彼此完全自洽，`verify()` 却报干净。修复：用 run 行里已存的 `variable_count` 与行数比对，并要求 `rank_in_run` 是连续的 0..n−1。这正是"自洽 ≠ 完整"的实例——独立 oracle 一开始就抓住了它，因为 oracle 知道应该有几个事件。
+
 ## 变形测试（不变量，全部通过）
 
 1. 输入重排（事件/门数组倒序）→ 概率与割集不变
@@ -146,12 +227,30 @@ rate 转换另有独立不变量（tests/test_rate_model.py）：λ 单调、t �
 18. `Q=0` ⟹ FV/RAW/RRW 三者均为 null 且 reason 恒为 `top_probability_is_zero`，BI 仍有定义
 19. 未定义项**从不**被占位数字替代（字段为 `null` 且必带 reason）
 
+存储另有不变量（tests/test_store.py，53 项）：
+
+20. `Fraction(store(x)) == x`：每个概率/重要度列读回后与源 `Fraction` 精确相等（含 `n/d`）
+21. 库中任何表、任何列的 `typeof()` 都不出现 `real`
+22. 同 `run_id` 同内容 → 幂等空操作，且**整行字节级不变**（连作者都不覆盖）
+23. 同 `run_id` 不同内容 → `RUN_ID_CONFLICT`，且已有行不变
+24. 被拒的写入是**原子**的：模型表/基线表计数不变（首次注册也回滚）
+25. 基线行插入后不再被改写（换基线后逐字节比对旧行）
+26. `stale ⟺ baseline_hash ≠ current_baseline_hash`（换基线后新旧 run 各就各位）
+27. 换基线后旧 run 的数值字段完全不变（旧证据仍可读）
+28. 评审状态机：仅 `proposed` 可被决定，仅 `approved` 可被应用，重复决定/重复应用/未批准即应用均拒
+29. `agent`/`assistant`/`ai`/`bot`/`local-cli`/`unknown`/空值均不能决定或应用（`APPROVAL_AUTHORITY`）
+30. 批准后基线被移动 → `apply` 以 `BASELINE_CONFLICT` 拒绝该过期批准
+31. 提案的规范形式被旁路修改 → `apply` 以 `INTEGRITY` 拒绝（重新哈希比对）
+32. 恢复出的副本与原库 `dump()` 逐行相同，且仍会拒绝冲突的 `run_id`
+33. `store verify` 能检出：改数值 / 删行 / 改割集 / 翻 stale / 改基线规范形式 / 增加 REAL 列 / 破坏多重线性恒等式
+
 ## 独立运行验证（无 Medini、无 A 线、无 LLM、无网络）
 
-- 全部代码仅用 Python 标准库（json/re/fractions/hashlib/dataclasses/argparse/pathlib/**decimal**）
+- 全部代码仅用 Python 标准库（json/re/fractions/hashlib/dataclasses/argparse/pathlib/decimal/**sqlite3**）
 - CLI 与内核在无网络沙箱实测通过（上列命令即实测）
 - 系统 Python 3.11 与托管 Python 3.13 均验证通过
 - 唯一外部依赖 pytest 仅用于测试执行，生产链路零依赖
+- 存储库为单个 `.sqlite` 文件（journal_mode 保持默认 DELETE，不产生 `-wal`/`-shm` 旁文件）
 
 ## 待专家复核事项
 
@@ -161,3 +260,6 @@ rate 转换另有独立不变量（tests/test_rate_model.py）：λ 单调、t �
 - K_OF_N 在真实业务模型中的使用约定（k 与输入语义）待 Gold Case 阶段确认
 - **重要度口径确认**：本版本 RAW/RRW 采用**比值形式**（`q+/Q`、`Q/q−`，DOE/NASA PSA 惯例），非增量形式。若业务方或适航审查要求增量口径（`1+ΔQ/Q`、`1−ΔQ/Q`），需作为**新增度量**而非改定义，以免历史结果不可比。待安全专家确认
 - **重要度未定义情形的处置**：`Q=0` 或 `q−ᵢ=0` 时 FV/RAW/RRW 数学上无定义，本版本如实输出 `null` + reason，不做任何近似替代。若工程上需要"退化值"，需先由安全专家给出语义规格
+- **基线与并发策略**：一期单写者 + 乐观并发（写入时校验预期基线哈希），不做锁。团队版（PostgreSQL）需重新裁决并发模型与冲突提示粒度
+- **"可批准身份"名单**：当前以显式 `--reviewer` 具名 + 一组保留标识（agent/assistant/ai/bot/local-cli/unknown）做拒绝判断。正式阶段应接认证层，由身份系统而非字符串判定授权
+- **变更提案的粒度**：当前提案是一份完整模型（无结构化 patch 语言）。是否需要对象级 patch 与影响范围分析，待 B05（FMEA/追溯）之后再定

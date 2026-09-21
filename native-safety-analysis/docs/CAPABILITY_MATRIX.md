@@ -17,14 +17,16 @@
 | NOT / non-coherent logic | 显式拒绝 | verified（拒绝路径） | — | SEMANTICS.md | 相干模型边界 |
 | dynamic_gates (PAND/PDP/SPARE) | 显式拒绝 | verified（N05） | — | tests/test_seed_cases.py | UNSUPPORTED_GATE |
 | repair / dormancy / CCF models | 显式拒绝 | verified（repairable/dormant/latent/inspection 各拒绝路径） | — | tests/test_rate_model.py | RATE_UNSUPPORTED，不静默退化 |
+| **local_baseline_run_store** | implemented | **verified**（52 次 run 用 2ⁿ oracle 重推导库内数值，1362 项**精确相等无容差**；53 份基线规范形式独立重哈希；4501 值 SQLite `typeof()` 扫描零 REAL；往返 dump==restore；**9/9 突变被检出**） | 未执行 | tests/test_store.py, verification/run_store_verification.py | 单写者 + 乐观并发；基线不可就地改写；无结构化 patch 语言；无回退命令；存储层不授予批准权 |
 | FMEA / requirements traceability | 未实现 | — | — | docs/NEXT_STEPS.md | 30 天工作包 B05 |
-| persistence (SQLite) / baselines | 未实现 | — | — | docs/NEXT_STEPS.md | 30 天工作包 B02 |
 | web workbench | 未实现 | — | — | docs/NEXT_STEPS.md | 第二阶段 |
 | Open-PSA / ReqIF import | 未实现 | — | — | docs/NEXT_STEPS.md | 互操作须专项验证 |
+| PostgreSQL 迁移 | 未实现 | — | — | docs/NEXT_STEPS.md | 一期已备 `store export` 往返，迁移脚本待团队版 |
 
 ## 使用边界声明
 
 本版本为**研究样机 + 方法可用候选**：
-- 可声明：对契约 0.1.0/0.2.0 范围内的相干静态 FTA 模型独立完成确定性精确计算（含恒定失效率→任务概率的一次受控舍入转换），并给出精确的 Birnbaum / Fussell–Vesely / RAW / RRW 重要度
+- 可声明：对契约 0.1.0/0.2.0 范围内的相干静态 FTA 模型独立完成确定性精确计算（含恒定失效率→任务概率的一次受控舍入转换），给出精确的 Birnbaum / Fussell–Vesely / RAW / RRW 重要度，并在本地库中按语义哈希锚定基线、保留旧版证据、把变更走"提案→批准→应用"闭环
 - 不可声明：替代 Medini、DO-330/TQL 任何等级、适航认可、正式安全结论；亦不可把 q 当作 per-flight-hour 指标；重要度数值本身不构成任何设计变更批准
+- 存储层记录的是**工程变更的决定**，不是安全结论的批准
 - `approval_state` 在所有输出中恒为 `not_granted_by_this_result`

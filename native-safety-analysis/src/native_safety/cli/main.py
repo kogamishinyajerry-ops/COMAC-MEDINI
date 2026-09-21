@@ -1,9 +1,9 @@
-"""CLI entry points: validate / analyze / capabilities.
+"""CLI entry points: validate / analyze / capabilities / store / review.
 
 Exit codes (stable contract):
   0  success
-  2  model invalid (semantic/parse error)
-  3  unsupported semantics
+  2  model invalid (semantic/parse error) or refused store/review request
+  3  unsupported semantics or an incompatible store schema generation
   4  resource limit hit
   5  internal error
 """
@@ -31,6 +31,9 @@ from ..kernel.solve import (
     SolveResult,
     solve_model,
 )
+from ..store import errors as store_err
+from ..store import IMPORTANCE_SORT_KEYS, SqliteRepository
+from ..store.errors import StoreError
 
 EXIT_OK = 0
 EXIT_INVALID = 2
@@ -58,7 +61,28 @@ IMPORTANCE_CONVENTIONS = {
 
 
 def _exit_for_code(code: str) -> int:
-    return EXIT_UNSUPPORTED if code in _UNSUPPORTED_CODES else EXIT_INVALID
+    if code in _UNSUPPORTED_CODES or code in store_err.UNSUPPORTED_CODES:
+        return EXIT_UNSUPPORTED
+    return EXIT_INVALID
+
+
+def _store_exit_for_code(code: str) -> int:
+    return EXIT_UNSUPPORTED if code in store_err.UNSUPPORTED_CODES else EXIT_INVALID
+
+
+def _emit(payload: dict) -> None:
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+def _store_refusal(code: str, message: str) -> int:
+    _emit({
+        "schema_version": CONTRACT_VERSION,
+        "engine_version": __version__,
+        "status": "failed",
+        "approval_state": "not_granted_by_this_result",
+        "error": {"code": code, "message": message},
+    })
+    return _store_exit_for_code(code)
 
 
 def _importance_record_payload(record, max_digits: int | None) -> dict:
@@ -189,8 +213,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     notes: list[str] = []
     artifacts: dict[str, str] = {"inputs/model_input.json": input_hash} if bundle else {}
+    # Defined here so the (optional) persist step can record a run that never
+    # produced a solution — an honest "failed" row beats a missing one.
+    solution: SolveResult | None = None
     try:
-        solution: SolveResult = solve_model(
+        solution = solve_model(
             model,
             max_nodes=args.max_nodes,
             max_mcs_paths=args.max_mcs_paths,
@@ -265,6 +292,47 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         payload["warnings"].append(f"internal error: {type(exc).__name__}: {exc}")
         notes.append("internal error")
         exit_code = EXIT_INTERNAL
+
+    # Persist BEFORE printing so the payload can carry the store outcome.
+    # A refused record does not discard the analysis: the payload still holds
+    # the full result, `store.status` says why it was not kept, and the exit
+    # code reflects the refusal so a script cannot mistake it for success.
+    store_exit = EXIT_OK
+    if args.db:
+        try:
+            with SqliteRepository(args.db) as repo:
+                outcome = repo.record_run(
+                    run_id=run_id,
+                    model=model,
+                    solution=solution,
+                    payload=payload,
+                    actor=args.actor,
+                    calculation_mode=_CALCULATION_MODE,
+                )
+            payload["store"] = {
+                "status": "recorded" if outcome.created else "idempotent",
+                "db": args.db,
+                "run_id": outcome.run_id,
+                "baseline_hash": outcome.baseline_hash,
+                "content_fingerprint": outcome.fingerprint,
+                "note": outcome.reason,
+            }
+        except StoreError as exc:
+            payload["store"] = {
+                "status": "refused", "db": args.db,
+                "error": {"code": exc.code, "message": exc.message},
+            }
+            payload["warnings"].append(f"store refused the record: {exc.code}: {exc.message}")
+            store_exit = _store_exit_for_code(exc.code)
+        except OSError as exc:
+            payload["store"] = {
+                "status": "refused", "db": args.db,
+                "error": {"code": "STORE_IO", "message": str(exc)},
+            }
+            payload["warnings"].append(f"store unavailable: {exc}")
+            store_exit = EXIT_INVALID
+        if store_exit != EXIT_OK and exit_code == EXIT_OK:
+            exit_code = store_exit
 
     print(json.dumps(payload, indent=2, ensure_ascii=False))
 
@@ -535,6 +603,25 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
                 "evidence_ids": ["tests/test_seed_cases.py"],
             },
             {
+                "capability_id": "local_baseline_run_store",
+                "status": "verified",
+                "method": "single-file SQLite store (models/baselines/runs/importance/reviews) with "
+                          "explicit migrations; semantic hash anchors every baseline; stored numbers "
+                          "are exact decimals or exact n/d rationals (no float column exists)",
+                "restrictions": [
+                    "one writer, optimistic concurrency (expected baseline hash must match)",
+                    "a baseline is immutable: a change registers a new hash and flags dependent runs stale",
+                    "run_id is idempotent on identical content and refuses to overwrite on conflict",
+                    "an agent may propose a change but never approve or apply it",
+                    "the store carries no approval authority; approval_state stays "
+                    "not_granted_by_this_result",
+                ],
+                "evidence_ids": [
+                    "tests/test_store.py",
+                    "verification/run_store_verification.py",
+                ],
+            },
+            {
                 "capability_id": "fmea_requirements_traceability",
                 "status": "unsupported",
                 "method": "not implemented in v0.1.0",
@@ -545,6 +632,264 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
     }
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return EXIT_OK
+
+
+# --------------------------------------------------------------------------
+# store / review: persistence and the change-management minimum loop
+# --------------------------------------------------------------------------
+
+
+_STORE_ENVELOPE = {"schema_version": CONTRACT_VERSION, "engine_version": __version__}
+
+
+def _store_payload(command: str, **fields) -> dict:
+    return {**_STORE_ENVELOPE, "command": command, **fields}
+
+
+def _load_or_fail(path: str) -> tuple[object | None, tuple[str, str] | None]:
+    """Load and validate a model; on failure return (None, (code, message))."""
+    try:
+        return load_model(path), None
+    except ModelError as exc:
+        return None, (exc.code, exc.message)
+
+
+def _model_refusal(code: str, message: str) -> int:
+    _emit({
+        **_STORE_ENVELOPE, "status": "failed",
+        "error": {"code": code, "message": message},
+    })
+    return _exit_for_code(code)
+
+
+def _raw_model_id(path: str) -> str | None:
+    """Best-effort model_id from an unvalidated file, for the audit trail."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = data.get("model_id") if isinstance(data, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def cmd_store(args: argparse.Namespace) -> int:
+    command = args.store_command
+    try:
+        if command == "init":
+            with SqliteRepository(args.db) as repo:
+                _emit(_store_payload("store init", status="ok", store=repo.status()))
+            return EXIT_OK
+
+        if command == "status":
+            with SqliteRepository(args.db) as repo:
+                _emit(_store_payload("store status", status="ok", store=repo.status()))
+            return EXIT_OK
+
+        if command == "runs":
+            with SqliteRepository(args.db) as repo:
+                runs = repo.list_runs(args.model, include_stale=not args.current_only)
+            _emit(_store_payload(
+                "store runs", status="ok", count=len(runs),
+                runs=[
+                    {
+                        "run_id": r["run_id"], "model_id": r["model_id"],
+                        "baseline_hash": r["baseline_hash"],
+                        "status": r["status"], "stale": bool(r["stale"]),
+                        "stale_reason": r["stale_reason"],
+                        "top_event_probability": r["top_event_probability"],
+                        "importance_status": r["importance_status"],
+                        "created_utc": r["created_utc"], "created_by": r["created_by"],
+                    }
+                    for r in runs
+                ],
+            ))
+            return EXIT_OK
+
+        if command == "show":
+            with SqliteRepository(args.db) as repo:
+                run = repo.get_run(args.run_id)
+                if run is None:
+                    return _store_refusal(store_err.RUN_NOT_FOUND, f"no run {args.run_id!r}")
+                importance = repo.run_importance(args.run_id)
+            run["payload"] = json.loads(run.pop("payload_json"))
+            run["cut_sets"] = json.loads(run.pop("cut_sets_json"))
+            _emit(_store_payload("store show", status="ok", run=run, importance=importance))
+            return EXIT_OK
+
+        if command == "baseline":
+            with SqliteRepository(args.db) as repo:
+                if repo.model_row(args.model_id) is None:
+                    return _store_refusal(
+                        store_err.MODEL_NOT_FOUND,
+                        f"model {args.model_id!r} has no baseline in this store; "
+                        "run `analyze --db` on a model of that id first",
+                    )
+                if args.all:
+                    baselines = repo.list_baselines(args.model_id)
+                    current = repo.current_baseline_hash(args.model_id)
+                else:
+                    one = repo.current_baseline(args.model_id)
+                    baselines = [one] if one else []
+                    current = one["baseline_hash"] if one else None
+            _emit(_store_payload(
+                "store baseline", status="ok", model_id=args.model_id,
+                current_baseline_hash=current,
+                baselines=[
+                    {
+                        "baseline_hash": b["baseline_hash"], "model_id": b["model_id"],
+                        "top_event": b["top_event"], "basic_event_count": b["basic_event_count"],
+                        "gate_count": b["gate_count"], "schema_version": b["schema_version"],
+                        "probability_semantics": b["probability_semantics"],
+                        "created_utc": b["created_utc"], "created_by": b["created_by"],
+                        "is_current": b["baseline_hash"] == current,
+                    }
+                    for b in baselines
+                ],
+            ))
+            return EXIT_OK
+
+        if command == "adopt-baseline":
+            model, failure = _load_or_fail(args.model)
+            if failure is not None:
+                return _model_refusal(*failure)
+            with SqliteRepository(args.db) as repo:
+                anchored, stale_ids = repo.register_model_baseline(
+                    model, actor=args.reviewer,
+                    expected_baseline_hash=args.expected_baseline_hash,
+                )
+            _emit(_store_payload(
+                "store adopt-baseline", status="ok", model_id=model.model_id,
+                baseline_hash=anchored, adopted_by=args.reviewer,
+                stale_run_ids=list(stale_ids),
+                note="re-anchored explicitly under a named reviewer; runs on the previous "
+                     "baseline are flagged stale and remain readable",
+            ))
+            return EXIT_OK
+
+        if command == "important":
+            with SqliteRepository(args.db) as repo:
+                if repo.get_run(args.run_id) is None:
+                    return _store_refusal(store_err.RUN_NOT_FOUND, f"no run {args.run_id!r}")
+                rows = repo.run_importance(args.run_id, by=args.by, top=args.top)
+            _emit(_store_payload(
+                "store important", status="ok", run_id=args.run_id, sorted_by=args.by,
+                exact=True,
+                convention="values are exact decimals or exact n/d rationals stored at write time; "
+                           "sorting used exact Fractions, not the text",
+                importance=rows,
+            ))
+            return EXIT_OK
+
+        if command == "verify":
+            with SqliteRepository(args.db) as repo:
+                problems = repo.verify()
+            _emit(_store_payload(
+                "store verify", status="ok" if not problems else "failed",
+                checks=[
+                    "declared column types admit no float (B_核心规划 §231)",
+                    "SQLite foreign_key_check",
+                    "every baseline canonical_json re-hashes to its baseline_hash",
+                    "every run payload agrees with its stored row",
+                    "every stored number re-parses exactly",
+                    "stored importance re-derives Q = q*q+ + (1-q)*q- and FV/RAW/RRW",
+                    "stale flags agree with the current baseline of each model",
+                ],
+                problems=problems,
+            ))
+            return EXIT_OK if not problems else EXIT_INTERNAL
+
+        if command == "export":
+            with SqliteRepository(args.db) as repo:
+                dump = repo.dump()
+            text = json.dumps(dump, indent=2, ensure_ascii=False)
+            if args.out:
+                Path(args.out).write_text(text, encoding="utf-8")
+                _emit(_store_payload(
+                    "store export", status="ok", out=args.out,
+                    tables={name: len(rows) for name, rows in dump["tables"].items()},
+                ))
+            else:
+                print(text)
+            return EXIT_OK
+
+        raise StoreError(store_err.BAD_ARGUMENT, f"unknown store command {command!r}")
+    except StoreError as exc:
+        return _store_refusal(exc.code, exc.message)
+    except OSError as exc:
+        return _store_refusal("STORE_IO", str(exc))
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    command = args.review_command
+    try:
+        if command == "propose":
+            model, failure = _load_or_fail(args.model)
+            model_id = model.model_id if model is not None else (args.model_id or _raw_model_id(args.model))
+            if model_id is None:
+                return _store_refusal(
+                    err.ID,
+                    f"{args.model!r} did not validate and carries no readable model_id; "
+                    "fix the model or pass --model-id so the rejected proposal is still recorded",
+                )
+            with SqliteRepository(args.db) as repo:
+                record = repo.propose_review(
+                    review_id=args.review_id,
+                    model_id=model_id,
+                    expected_baseline_hash=args.expected_baseline_hash,
+                    proposed_model=model,
+                    proposed_by=args.reviewer,
+                    note=args.note,
+                    validation_error=(
+                        None if failure is None else {"code": failure[0], "message": failure[1]}
+                    ),
+                )
+            _emit(_store_payload(
+                "review propose", status="ok", review=record,
+                note="a proposal never changes the baseline; approval and application are separate, "
+                     "human-authorised steps",
+            ))
+            return EXIT_OK
+
+        if command == "list":
+            with SqliteRepository(args.db) as repo:
+                records = repo.list_reviews(state=args.state, model_id=args.model_id)
+            _emit(_store_payload("review list", status="ok", count=len(records), reviews=records))
+            return EXIT_OK
+
+        if command == "show":
+            with SqliteRepository(args.db) as repo:
+                record = repo.get_review(args.review_id)
+            if record is None:
+                return _store_refusal(store_err.REVIEW_NOT_FOUND, f"no review {args.review_id!r}")
+            _emit(_store_payload("review show", status="ok", review=record))
+            return EXIT_OK
+
+        if command == "decide":
+            with SqliteRepository(args.db) as repo:
+                record = repo.decide_review(
+                    args.review_id, approve=args.approve, reviewer=args.reviewer, note=args.note
+                )
+            _emit(_store_payload(
+                "review decide", status="ok", review=record,
+                note="a decision does not change the baseline; apply it explicitly",
+            ))
+            return EXIT_OK
+
+        if command == "apply":
+            with SqliteRepository(args.db) as repo:
+                record, stale_ids = repo.apply_review(args.review_id, reviewer=args.reviewer)
+            _emit(_store_payload(
+                "review apply", status="ok", review=record, stale_run_ids=list(stale_ids),
+                note="the approved baseline is now current; runs on the previous baseline are "
+                     "flagged stale and their stored payloads remain readable",
+            ))
+            return EXIT_OK
+
+        raise StoreError(store_err.BAD_ARGUMENT, f"unknown review command {command!r}")
+    except StoreError as exc:
+        return _store_refusal(exc.code, exc.message)
+    except OSError as exc:
+        return _store_refusal("STORE_IO", str(exc))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -572,10 +917,115 @@ def build_parser() -> argparse.ArgumentParser:
         help="importance measures: auto (default, computed unless the model is very wide), "
              "on (always), off (skip; the payload states it was skipped)",
     )
+    p_analyze.add_argument(
+        "--db", default=None,
+        help="persist this run into a local SQLite store (idempotent on identical content); "
+             "a model whose semantics changed must be approved through the review loop first",
+    )
+    p_analyze.add_argument("--actor", default="local-cli", help="recorded as the run's author")
     p_analyze.set_defaults(func=cmd_analyze)
 
     p_caps = sub.add_parser("capabilities", help="print capability matrix with honest statuses")
     p_caps.set_defaults(func=cmd_capabilities)
+
+    # ---- store -----------------------------------------------------------
+    p_store = sub.add_parser("store", help="local SQLite store: baselines, runs, importance")
+    store_sub = p_store.add_subparsers(dest="store_command", required=True)
+
+    p_s = store_sub.add_parser("init", help="create (or migrate) the store file")
+    p_s.add_argument("db")
+    p_s.set_defaults(func=cmd_store)
+
+    p_s = store_sub.add_parser("status", help="counts, stale runs, pending reviews")
+    p_s.add_argument("db")
+    p_s.set_defaults(func=cmd_store)
+
+    p_s = store_sub.add_parser("runs", help="list runs and their staleness")
+    p_s.add_argument("db")
+    p_s.add_argument("--model", default=None, help="restrict to one model_id")
+    p_s.add_argument("--current-only", action="store_true", help="hide runs on superseded baselines")
+    p_s.set_defaults(func=cmd_store)
+
+    p_s = store_sub.add_parser("show", help="full stored run: row, payload, importance")
+    p_s.add_argument("db")
+    p_s.add_argument("run_id")
+    p_s.set_defaults(func=cmd_store)
+
+    p_s = store_sub.add_parser("baseline", help="show the current (or all) baselines of a model")
+    p_s.add_argument("db")
+    p_s.add_argument("model_id")
+    p_s.add_argument("--all", action="store_true", help="include superseded baselines")
+    p_s.set_defaults(func=cmd_store)
+
+    p_s = store_sub.add_parser(
+        "adopt-baseline",
+        help="re-anchor a model to new semantics under a named reviewer (marks old runs stale)",
+    )
+    p_s.add_argument("db")
+    p_s.add_argument("model")
+    p_s.add_argument("--expected-baseline-hash", required=True,
+                     help="optimistic concurrency: the baseline you believe is current")
+    p_s.add_argument("--reviewer", required=True, help="human identity taking responsibility")
+    p_s.set_defaults(func=cmd_store)
+
+    p_s = store_sub.add_parser("important", help="top-N events by an importance measure")
+    p_s.add_argument("db")
+    p_s.add_argument("run_id")
+    p_s.add_argument("--by", choices=IMPORTANCE_SORT_KEYS, default="fussell_vesely")
+    p_s.add_argument("--top", type=int, default=None)
+    p_s.set_defaults(func=cmd_store)
+
+    p_s = store_sub.add_parser("verify", help="integrity checks over the stored data")
+    p_s.add_argument("db")
+    p_s.set_defaults(func=cmd_store)
+
+    p_s = store_sub.add_parser("export", help="dump every table as JSON (migration / round-trip)")
+    p_s.add_argument("db")
+    p_s.add_argument("--out", default=None, help="write to this file instead of stdout")
+    p_s.set_defaults(func=cmd_store)
+
+    # ---- review ----------------------------------------------------------
+    p_review = sub.add_parser("review", help="change-management minimum loop for a model baseline")
+    review_sub = p_review.add_subparsers(dest="review_command", required=True)
+
+    p_r = review_sub.add_parser("propose", help="record a proposed model change (never applies it)")
+    p_r.add_argument("db")
+    p_r.add_argument("model")
+    p_r.add_argument("--review-id", required=True)
+    p_r.add_argument("--expected-baseline-hash", required=True)
+    p_r.add_argument("--reviewer", default="agent",
+                     help="who proposes (default: agent — an agent may propose but never approve)")
+    p_r.add_argument("--note", default=None)
+    p_r.add_argument("--model-id", default=None,
+                     help="used only when the proposed model fails validation")
+    p_r.set_defaults(func=cmd_review)
+
+    p_r = review_sub.add_parser("list", help="list reviews")
+    p_r.add_argument("db")
+    p_r.add_argument("--state", default=None)
+    p_r.add_argument("--model-id", default=None)
+    p_r.set_defaults(func=cmd_review)
+
+    p_r = review_sub.add_parser("show", help="show one review")
+    p_r.add_argument("db")
+    p_r.add_argument("review_id")
+    p_r.set_defaults(func=cmd_review)
+
+    p_r = review_sub.add_parser("decide", help="approve or reject a proposal (requires a human)")
+    p_r.add_argument("db")
+    p_r.add_argument("review_id")
+    decision = p_r.add_mutually_exclusive_group(required=True)
+    decision.add_argument("--approve", action="store_true")
+    decision.add_argument("--reject", dest="approve", action="store_false")
+    p_r.add_argument("--reviewer", default=None)
+    p_r.add_argument("--note", default=None)
+    p_r.set_defaults(func=cmd_review)
+
+    p_r = review_sub.add_parser("apply", help="apply an approved proposal (requires a human)")
+    p_r.add_argument("db")
+    p_r.add_argument("review_id")
+    p_r.add_argument("--reviewer", default=None)
+    p_r.set_defaults(func=cmd_review)
 
     return parser
 

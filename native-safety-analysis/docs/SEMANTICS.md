@@ -122,6 +122,72 @@ Q = qᵢ·q+ᵢ + (1 − qᵢ)·q−ᵢ          （多重线性恒等式，无�
 
 **渲染精度：** 固定概率模型的度量值为**精确有理数**（有限小数渲染为十进制，非有限小数渲染为 n/d，`importance_exact = true`）。由失效率转换而来的模型按模型声明的 rate 精度（默认 40 位有效数字）显示，与 `probability_interpretation` 一致，此时 `importance_exact = false` 并附说明性警告。
 
+## 存储与基线语义（本地 SQLite 库）
+
+单文件 SQLite（`--db <path>`）。关系表足以表达初期本体，不引入图数据库；团队版迁移 PostgreSQL 时用 `store export` 做往返（B_核心规划 §88）。
+
+### 五张表的含义
+
+| 表 | 一行代表 | 关键约束 |
+| --- | --- | --- |
+| `models` | 一个逻辑模型（按 `model_id` 去重） | `current_baseline_hash` 指向当前基线 |
+| `baselines` | 一份**不可变**的语义快照，主键是语义哈希 | 一旦插入，任何字段都不再改写 |
+| `runs` | 一次分析结果（含完整结果 JSON） | `run_id` 不可变；`content_fingerprint` 判等 |
+| `importance` | 一次 run 中一个事件的度量 | 主键 `(run_id, event_id)`，全为精确文本 |
+| `reviews` | 一次变更提案及其决定 | 状态机见下 |
+
+### 精确存储（§231：显示舍入不得改变存储结果）
+
+- 一切概率类数值以 `TEXT` 存储，内容为**精确十进制**（有限小数）或**精确 `n/d` 有理数**（非有限小数），一律不是浮点。
+- 存储的是**计算结果本身的精确有理数**，不是输出信封里经过显示舍入的字符串；两者的差异在结果 JSON 的 `engine_stats.top_probability_exact` 中可见。
+- 重要度值按 run + event 逐个精确入库。FV/RAW/RRW 是概率之比，通常非有限小数，因此以 `n/d` 形式入库（例如 M03 的 `fussell_vesely = "7/22"`）。
+- 库中**不存在 REAL/FLOAT/NUMERIC/DECIMAL 列**；验证脚本还会用 SQLite 的 `typeof()` 逐个值检查实际存储类（`store verify` 同法自检）。
+- 同一 run 的 JSON 载荷（`payload_json`）与结构化列是**两份独立序列化**，完整性检查逐条比对二者。
+
+### 语义哈希作为版本锚
+
+- baseline 的主键即 `canonical-v1` 语义哈希。库内保存产生该哈希的**规范形式**（`canonical_json`），因此任何人都能把规范形式重哈希、比对主键，独立证明这行没有被动过。
+- 规范形式之外另存 `provenance_json`（label、source、derivation、rate 记录）：这些**不参与哈希**（改个标签不是语义变更），但一并留档以便溯源。
+
+### 三条不可越过的写入规则
+
+1. **基线不可就地改写**（§203）。改变模型语义产生一份**新的** baseline，旧的仍然完整保留。
+2. **`run_id` 幂等**。同一 `run_id` 再次写入：
+   - 内容指纹相同 → 幂等空操作，不新增行、不改写已有行（连 `created_by` 都不覆盖）
+   - 内容指纹不同 → `RUN_ID_CONFLICT` 拒绝，绝不覆盖
+3. **不允许通过重跑悄悄换基线**。`model_id` 已存在且语义哈希与当前基线不符时，记录被拒（`BASELINE_NOT_CURRENT`），必须走评审闭环或显式的 `store adopt-baseline`。
+   - 拒绝是**原子**的：首次见到的模型/基线也不会被留下。
+
+### 乐观并发（§201）
+
+- `store adopt-baseline` 与 `review propose` 都要求 `--expected-baseline-hash`；与库中当前值不符即 `BASELINE_CONFLICT`。
+- 对尚无基线的模型声明"期望某个基线"同样拒绝（不是静默创建）。
+- 一期为单写者模型；多写者阶段在此处扩展为模型级/对象级冲突提示。
+
+### stale 规则（§203）
+
+- 每个模型有一个 `current_baseline_hash`。**run 的 `baseline_hash` 不等于其模型当前基线 ⟺ 该 run 被标 stale**，且必须带 `stale_reason`。
+- 换基线（评审 apply 或显式 adopt）时，同模型下落在旧基线上的 run 一律置 stale，并**保留其完整载荷**——旧版证据仍可查看，只是不再代表当前语义。
+- 上述等价关系由验证独立重算（不由被测对象自述）。
+
+### 变更管理最小闭环（§195-196）
+
+```
+review propose   --expected-baseline-hash H   （校验提案；不改变任何基线）
+review decide    --approve | --reject         （需要具名人类）
+review apply                                  （需要具名人类；把已批准语义设为当前基线并传播 stale）
+```
+
+状态机：`proposed` →（`approved` | `rejected`）；仅 `approved` 可 → `applied`。提案无法通过校验时记为 `invalid`（保留审计痕迹，但无 `proposed_hash`，不可批准）。
+
+三条硬约束：
+
+1. **Agent 无批准权**（§181）。`decide` / `apply` 要求 `--reviewer` 为具名人类身份；`agent`、`assistant`、`ai`、`bot`、`local-cli`、`unknown`、空值一律 `APPROVAL_AUTHORITY` 拒绝。Agent 只能 `propose`。
+2. **批准绑定基线**。批准后若基线被他人移动，`apply` 会以 `BASELINE_CONFLICT` 拒绝该过期批准，要求重新决定，而不是盲目套用。
+3. **批准绑定内容**。`apply` 时把已批准的规范形式**重新哈希**并与提案记录的哈希比对；不一致（例如库被旁路修改）则 `INTEGRITY` 拒绝，绝不把被改过的内容设为基线。
+
+**存储层不授予任何批准权**：无论评审走到哪一步，结果信封的 `approval_state` 恒为 `not_granted_by_this_result`。`reviews` 表记录的是工程变更的决定，不是安全结论的批准。
+
 ## 结构校验规则（实现顺序即拒绝优先级）
 
 1. schema_version 不在 {0.1.0, 0.2.0} → VERSION
@@ -147,9 +213,14 @@ Q = qᵢ·q+ᵢ + (1 − qᵢ)·q−ᵢ          （多重线性恒等式，无�
 | 错误码 | 退出码 |
 | --- | --- |
 | UNSUPPORTED_GATE, RATE_UNSUPPORTED | 3（不支持） |
+| STORE_SCHEMA_MISMATCH（库由不兼容的 schema 世代写入） | 3（不支持） |
 | VERSION, ASSUMPTIONS, ID, DUPLICATE_ID, INPUTS, SOURCE, PROBABILITY, RATE_VALUE, RATE_UNITS, K_OF_N, UNKNOWN_REFERENCE, CYCLE, TOP_EVENT, SIZE_LIMIT, PARSE, IO | 2（非法输入） |
+| RUN_ID_CONFLICT, BASELINE_NOT_CURRENT, BASELINE_CONFLICT, REVIEW_NOT_FOUND, RUN_NOT_FOUND, MODEL_NOT_FOUND, REVIEW_STATE, APPROVAL_AUTHORITY, STORE_BAD_ARGUMENT, STORE_IO | 2（请求被拒） |
+| INTEGRITY（`store verify` 发现库内不一致） | 5 |
 | 节点/路径上限触发 | 4（资源受限，非错误，结果标 resource_limited） |
 | 内部异常 | 5 |
+
+`analyze --db` 的组合语义：**计算成功但记录被拒**时，退出码取该拒绝的码（2/3），结果信封的 `status` 仍如实反映分析本身（通常 `succeeded`），并新增 `store.status = "refused"` 与 `store.error`。即：不丢弃计算结果，也不把持久化失败当成成功。
 
 ## 输出语义
 
@@ -167,6 +238,7 @@ Q = qᵢ·q+ᵢ + (1 − qᵢ)·q−ᵢ          （多重线性恒等式，无�
 - `importance_conventions`：随结果发布的度量定义与约定，使消费方无需猜测口径
 - `importance_exact`：布尔，指示渲染是否无损（见"渲染精度"）
 - `warnings[]`：含强制提示"mission-time probability, NOT a per-flight-hour metric"
+- `store`（仅 `--db` 时出现）：`status ∈ {recorded, idempotent, refused}`，以及 `db`、`run_id`、`baseline_hash`、`content_fingerprint`；被拒时附 `error{code,message}`
 
 ## 明确排除（当前版本的拒绝边界）
 
