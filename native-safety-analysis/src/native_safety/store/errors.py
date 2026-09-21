@@ -34,6 +34,11 @@ FMEA_STATE = "FMEA_STATE"
 # The row moved on since the proposal: the revision it targets is no longer the
 # current version. Mirrors BASELINE_CONFLICT for the FMEA side.
 FMEA_REVISION_CONFLICT = "FMEA_REVISION_CONFLICT"
+# The draft is still a machine-generated attention placeholder: it names an
+# event and the exact importance that flagged it, but its failure mode / cause /
+# effect are unfilled. Promoting it would record an inference as a settled fact
+# (§110), so the apply is refused until a human writes the real content.
+FMEA_PLACEHOLDER = "FMEA_PLACEHOLDER"
 # A store subcommand argument is out of range or unknown.
 BAD_ARGUMENT = "STORE_BAD_ARGUMENT"
 # The declared actor may not approve (agents and the local CLI placeholder

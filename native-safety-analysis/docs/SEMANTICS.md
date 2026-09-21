@@ -247,6 +247,24 @@ fmea apply     --reviewer NAME                                    （需要具�
 - 批准同时绑定**内容**（规范形式重哈希）与**基线**（`expected_baseline_hash`）：任一被他人移动，`apply` 以 `BASELINE_CONFLICT` 拒绝该过期批准，要求重新决定。
 - 与模型评审一致：**库不授予任何批准权**，`approval_state` 恒为 `not_granted_by_this_result`。FMEA 行的批准是工程内容的确认，不是安全结论的批准。
 
+### 重要度驱动的关注项（关注项 ≠ 事实）
+
+引擎能按重要度给基本事件排序，但**不知道**失效模式、原因或控制措施。因此它绝不编造 FMEA 内容——它能产出的唯一诚实产物是**工单**：
+
+```bash
+fmea propose-from-importance <db> --run <run_id> [--by <度量>] [--top N] [--min-value X]
+```
+
+- **定量理由必须精确可复现**：`inference_note` 写明度量名、**精确值**、在可比事件中的排名、`run_id` 与基线哈希前 12 位。
+- **不可知的一律置空并打标**：失效模式/原因/局部影响/系统影响全部以 `[UNCONFIRMED]` 前缀标记；`component_id` / `function_id` 置为 `COMPONENT-UNASSIGNED` / `FUNCTION-UNASSIGNED`；控制/证据/要求为空。**没有一个字段被编造。**
+- **关注项永不自动成为事实**：标记行即使被人类批准，`apply` 仍以 `FMEA_PLACEHOLDER` 拒绝入表。人类回答工单的方式是**为同一 `fmea_id` 另行提出真实内容**，再走常规批准；原工单草稿保留在候选队列中作为轨迹。
+- **正式表永不出现未填写的关注项**：这是独立验证的一项检查（若某行带着标记进了正式表即判失败）。
+- **不重复唠叨**：生成器先查两件事——该事件是否已被当前正式行引用（`already_in_official_table`）、该 `fmea_id` 是否已有草稿（`already_pending` / `already_decided`）。命中即跳过并给出理由，因此重复运行是空操作。
+- **`--top` 只计新增草稿**：已覆盖/已起草的事件不占名额；`--min-value` 按**精确有理数**比较（`1/3` 与 `0.333…` 不相等），排序与过滤都不经过文本。
+- **未定义度量不是关注信号**：`null`（如本质事件没有 RRW）一律跳过并注明 `measure_is_undefined`。
+- **过期基线不生成**：run 已落在被取代的基线上时拒绝（`BASELINE_NOT_CURRENT`），因为那份排名描述的是已经不存在的模型。
+- 被跳过的项与"未扫描的剩余条数"**如实输出**，不静默少给。
+
 ## 结构校验规则（实现顺序即拒绝优先级）
 
 1. schema_version 不在 {0.1.0, 0.2.0} → VERSION
@@ -274,7 +292,7 @@ fmea apply     --reviewer NAME                                    （需要具�
 | UNSUPPORTED_GATE, RATE_UNSUPPORTED | 3（不支持） |
 | STORE_SCHEMA_MISMATCH（库由不兼容的 schema 世代写入） | 3（不支持） |
 | VERSION, ASSUMPTIONS, ID, DUPLICATE_ID, INPUTS, SOURCE, PROBABILITY, RATE_VALUE, RATE_UNITS, K_OF_N, UNKNOWN_REFERENCE, CYCLE, TOP_EVENT, SIZE_LIMIT, PARSE, IO, FMEA_INPUTS, FMEA_ID, FMEA_SOURCE, FMEA_LINK | 2（非法输入） |
-| RUN_ID_CONFLICT, BASELINE_NOT_CURRENT, BASELINE_CONFLICT, REVIEW_NOT_FOUND, RUN_NOT_FOUND, MODEL_NOT_FOUND, REVIEW_STATE, APPROVAL_AUTHORITY, STORE_BAD_ARGUMENT, STORE_IO, FMEA_NOT_FOUND, FMEA_STATE, FMEA_REVISION_CONFLICT | 2（请求被拒） |
+| RUN_ID_CONFLICT, BASELINE_NOT_CURRENT, BASELINE_CONFLICT, REVIEW_NOT_FOUND, RUN_NOT_FOUND, MODEL_NOT_FOUND, REVIEW_STATE, APPROVAL_AUTHORITY, STORE_BAD_ARGUMENT, STORE_IO, FMEA_NOT_FOUND, FMEA_STATE, FMEA_REVISION_CONFLICT, FMEA_PLACEHOLDER | 2（请求被拒） |
 | INTEGRITY（`store verify` 发现库内不一致） | 5 |
 | 节点/路径上限触发 | 4（资源受限，非错误，结果标 resource_limited） |
 | 内部异常 | 5 |
@@ -304,5 +322,7 @@ fmea apply     --reviewer NAME                                    （需要具�
 动态门、顺序失效、修复过程、潜伏/检查间隔、未建模相关性/共因、NOT/非相干逻辑、任意概率分布表达式、软件失效随机化、非恒定失效率（Weibull/老化）。以上任何一项出现在输入中都会导致明确拒绝，不会退化为 AND/OR。
 
 FMEA 侧同样明确排除：FMECA 的 severity/occurrence/detection/RPN、FMEDA、诊断覆盖率与失效率分配、组件/功能/要求的独立对象表、结构化 patch 语言。以上均为后续阶段项，本版本不接受、不近似。
+
+同样排除 **"引擎替人撰写 FMEA 内容"**：重要度只能指出**哪个事件值得关注**（并给出精确理由），不能产出失效模式、原因或影响。任何"自动填出失败模式"的行为都属于编造工程结论，本版本在数据结构层面就不提供该能力——关注项的四个描述字段只能以标记占位存在，且带标记的行**永远无法**进入正式表。
 
 > 注：**恒定失效率λ + 任务时间 t → 任务失效概率 q** 的转换已实现并验证（见"失效率转换语义"），是本版本新纳入的语义，不再属于排除项。

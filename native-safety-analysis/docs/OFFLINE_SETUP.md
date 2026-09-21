@@ -55,33 +55,50 @@ python run.py store adopt-baseline store.sqlite <new_model.json> \
 FMEA 行与基本事件**多对多**关联；机器推断的行必须写 `inference_note`，且**人工批准后**才入正式表。已批准内容不可就地改写——修订产生**新版本**。
 
 ```bash
-# 提案（agent 可提案；推断行必须写清待确认事项）
-python run.py fmea propose store.sqlite <fmea_row.json> --review-id FREV-1 \
-       --model <model_id> --source inference --inference-note "待确认：密封件材料 B 的高温退化率" \
-       --expected-version 0 --reviewer agent
+# 提案（agent 可提案；model_id 与 source 写在行 JSON 里）。推断行的 inference_note 不可省
+python run.py fmea propose store.sqlite <fmea_row.json> \
+       --candidate-id FREV-1 --expected-baseline-hash <current> --reviewer agent
+# 修订既有行时必须指名目标版本：--expected-version <v>
 
 # 具名人类批准 → 应用（应用后旧版本自动 superseded，且不会被就地改写）
 python run.py fmea decide store.sqlite FREV-1 --approve --reviewer <human>
 python run.py fmea apply  store.sqlite FREV-1 --reviewer <human>
 
-python run.py fmea rows      store.sqlite --model <model_id> [--all]   # 当前版本（--all 含被取代）
-python run.py fmea candidates store.sqlite [--state proposed]
-python run.py fmea show      store.sqlite <fmea_id> [--version N]
-python run.py fmea trace     store.sqlite --event <event_id>       # 引用该事件的全部行
-python run.py fmea trace     store.sqlite --component <component_id>
-python run.py fmea trace     store.sqlite --dangling               # 基线移动后失联的关联（只报告）
+python run.py fmea rows      store.sqlite --model <model_id> [--include-superseded]
+python run.py fmea candidates store.sqlite [--state proposed] [--model <model_id>]
+python run.py fmea show      store.sqlite <candidate_id>
+python run.py fmea trace     store.sqlite --model <model_id> --event <event_id>
+python run.py fmea trace     store.sqlite --model <model_id> --component <component_id>
+python run.py fmea trace     store.sqlite --model <model_id> --dangling    # 失联关联（只报告）
 ```
 
-> 注意：`--source inference` 省略 `--inference-note` 会被拒（`FMEA_SOURCE`，退出码 2）。悬空关联是**追溯缺口**，`store verify` 不将其判为损坏。
+> 注意：`source: "inference"` 而缺 `inference_note` 会被拒（`FMEA_SOURCE`，退出码 2）。悬空关联是**追溯缺口**，`store verify` 不将其判为损坏。
 
 样例：`examples/F01_fmea_seal_leak.json`（人工行）、`examples/F02_fmea_inference_mode.json`（推断行）。
+
+### 由重要度排序生成关注项（工作项，不是内容）
+
+引擎会按重要度指出**哪些事件值得做 FMEA**，但它不知道失效模式/原因/影响，因此只生成**带标记的工作项**：
+
+```bash
+# 从某个 run 的已存重要度排名生成草稿（默认按 Fussell–Vesely，最多 10 条新草稿）
+python run.py fmea propose-from-importance store.sqlite --run <run_id> \
+       [--by fussell_vesely|birnbaum_importance|risk_achievement_worth|risk_reduction_worth|event_probability] \
+       [--top N] [--min-value 0.1]
+
+# 重复运行是空操作：已覆盖/已起草的事件会跳过并给出理由
+# --min-value 按精确有理数比较（0.1 或 1/10 均可）；未定义的度量一律跳过
+```
+
+生成的草稿四个描述字段都以 `[UNCONFIRMED]` 开头，组件/功能为 `COMPONENT-UNASSIGNED` / `FUNCTION-UNASSIGNED`。
+**带标记的行永远无法入表**：即使人类批准，`apply` 仍以 `FMEA_PLACEHOLDER` 拒绝（退出码 2）。人类的回答方式是**为同一 `fmea_id` 另行提出真实内容**，再走常规批准。
 
 ## 退出码
 
 | 码 | 含义 |
 | --- | --- |
 | 0 | 成功 |
-| 2 | 模型非法（语义/解析错误，含单位/失效率参数非法）；或存储/评审请求被拒（RUN_ID_CONFLICT / BASELINE_* / REVIEW_* / APPROVAL_AUTHORITY） |
+| 2 | 模型非法（语义/解析错误，含单位/失效率参数非法、FMEA 输入/身份/来源/关联非法）；或存储/评审请求被拒（RUN_ID_CONFLICT / BASELINE_* / REVIEW_* / APPROVAL_AUTHORITY / FMEA_NOT_FOUND / FMEA_STATE / FMEA_REVISION_CONFLICT / FMEA_PLACEHOLDER） |
 | 3 | 不支持的语义（如 PAND、非恒定失效率、可修复语义）；或库由不兼容的 schema 世代写入（STORE_SCHEMA_MISMATCH） |
 | 4 | 资源上限（BDD 节点/割集路径截断） |
 | 5 | 内部错误（含 `store verify` 发现的存储不一致），如实失败，不冒充成功 |
@@ -95,7 +112,7 @@ python run.py fmea trace     store.sqlite --dangling               # 基线移�
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install pytest    # 联网准备环境执行
-.venv/Scripts/python -m pytest tests/ -q      # 208 项，离线可跑
+.venv/Scripts/python -m pytest tests/ -q      # 226 项，离线可跑
 
 # 交叉验证不需要 pytest（纯标准库）：
 python verification/run_cross_check.py              # 210 模型（结构），离线可跑

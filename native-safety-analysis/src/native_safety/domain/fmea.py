@@ -32,10 +32,13 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from fractions import Fraction
+from typing import Collection, Mapping, Sequence
 
 from . import errors
 from .errors import ModelError
 from .model import ID_PATTERN
+from .ratnum import exact_decimal_or_fraction
 
 FMEA_CANONICALIZATION_VERSION = "fmea-canonical-v1"
 
@@ -51,6 +54,26 @@ MAX_CONTROLS = 64
 MAX_EVIDENCE = 64
 MAX_REQUIREMENTS = 64
 MAX_LINKS = 256
+
+# ---------------------------------------------------------------------------
+# Importance-driven attention drafts
+# ---------------------------------------------------------------------------
+# The engine can rank basic events by importance, but it does NOT know a failure
+# mode, a cause, or a control. So the only honest thing it can produce is a WORK
+# ITEM: "this event deserves an FMEA row; here is the exact quantitative reason;
+# every descriptive field is still empty". Every descriptive field is prefixed
+# with a marker so the fact that the row is unfinished is machine-visible, the
+# store refuses to promote such a row, and `verify()` flags one that somehow
+# reached the official table anyway (§110: an inference is never settled).
+ATTENTION_MARKER = "[UNCONFIRMED]"
+ATTENTION_FMEA_PREFIX = "FMEA-ATTN-"
+UNASSIGNED_COMPONENT = "COMPONENT-UNASSIGNED"
+UNASSIGNED_FUNCTION = "FUNCTION-UNASSIGNED"
+
+#: The descriptive fields that must never still carry the marker in the official table.
+ATTENTION_DESCRIPTIVE_FIELDS = ("failure_mode", "cause", "local_effect", "system_effect")
+
+DEFAULT_ATTENTION_TOP = 10
 
 
 @dataclass(frozen=True)
@@ -262,6 +285,176 @@ def _id_list(raw, key: str, limit: int) -> tuple[str, ...]:
     if len(set(out)) != len(out):
         raise ModelError(errors.FMEA_INPUTS, f"{key} contains duplicates")
     return tuple(out)
+
+
+def attention_fmea_id(event_id: str) -> str:
+    """The stable id of the attention draft that watches one basic event.
+
+    Derived from the event id, so re-running the generator maps to the same
+    identity instead of inventing a second work item for the same event.
+    """
+    return f"{ATTENTION_FMEA_PREFIX}{event_id}"
+
+
+def is_attention_placeholder(text: str) -> bool:
+    return ATTENTION_MARKER in (text or "")
+
+
+def row_has_attention_placeholder(row: FmeaRow) -> bool:
+    """True while any descriptive field is still a machine-written placeholder."""
+    return any(is_attention_placeholder(getattr(row, field)) for field in ATTENTION_DESCRIPTIVE_FIELDS)
+
+
+def canonical_has_attention_placeholder(canonical: dict) -> bool:
+    """Same test, on a stored canonical form (the store never rebuilds rows)."""
+    return any(
+        is_attention_placeholder(canonical.get(field) or "")
+        for field in ATTENTION_DESCRIPTIVE_FIELDS
+    )
+
+
+def attention_draft_row(
+    *,
+    model_id: str,
+    event_id: str,
+    measure: str,
+    value_text: str,
+    rank: int,
+    considered: int,
+    run_id: str,
+    baseline_hash: str,
+) -> dict:
+    """Build a raw FMEA draft that records *why* the event deserves attention.
+
+    The quantitative reason is exact and reproducible (measure, exact value,
+    rank among comparable events, run, baseline). Everything the engine cannot
+    know is left as a marked placeholder rather than fabricated.
+    """
+    note = (
+        f"由重要度排序自动生成：度量 {measure} = {value_text}，在 {considered} 个可比值中排第 {rank}"
+        f"（run {run_id}，基线 {baseline_hash[:12]}…）。本行仅指出关注对象，"
+        "失效模式/原因/影响/控制/证据均未填写，须由人工补全后另行提出；"
+        "未经确认的推断不得作为事实使用。"
+    )
+    return {
+        "fmea_id": attention_fmea_id(event_id),
+        "model_id": model_id,
+        "component_id": UNASSIGNED_COMPONENT,
+        "function_id": UNASSIGNED_FUNCTION,
+        "failure_mode": f"{ATTENTION_MARKER} 失效模式待填写（关注事件 {event_id}）",
+        "cause": f"{ATTENTION_MARKER} 失效原因待填写",
+        "local_effect": f"{ATTENTION_MARKER} 局部影响待填写",
+        "system_effect": f"{ATTENTION_MARKER} 系统影响待填写",
+        "controls": [],
+        "evidence": [],
+        "requirement_ids": [],
+        "linked_event_ids": [event_id],
+        "source": INFERENCE_SOURCE,
+        "certainty": "由重要度排序生成，未经人工确认",
+        "inference_note": note,
+    }
+
+
+def plan_attention_drafts(
+    rows: Sequence[dict],
+    *,
+    model_id: str,
+    measure: str,
+    run_id: str,
+    baseline_hash: str,
+    covered_event_ids: Collection[str] = (),
+    drafted_fmea_states: Mapping[str, str] | None = None,
+    top: int | None = None,
+    min_value: Fraction | None = None,
+) -> tuple[list[dict], list[dict], int]:
+    """Turn an importance ranking into attention drafts.
+
+    Returns ``(drafts, skipped, not_considered)``. Skips are reported with a
+    reason so a caller can explain a shortfall instead of silently proposing
+    fewer rows than asked. The function is pure: it never touches the store.
+
+    ``rows`` must already be sorted by ``measure`` (descending, undefined last)
+    — the store does that on exact ``Fraction``s, never on the stored text.
+    """
+    covered = set(covered_event_ids)
+    drafted = dict(drafted_fmea_states or {})
+    defined_total = sum(1 for row in rows if row.get(measure) is not None)
+
+    drafts: list[dict] = []
+    skipped: list[dict] = []
+    defined_seen = 0
+    not_considered = 0
+
+    for row in rows:
+        event_id = row.get("event_id")
+        raw_value = row.get(measure)
+        if raw_value is None:
+            skipped.append(
+                {
+                    "event_id": event_id,
+                    "reason": "measure_is_undefined",
+                    "detail": f"{measure} is undefined for this event (stored as null with a reason); "
+                              "an undefined measure is not an attention signal",
+                }
+            )
+            continue
+        value = Fraction(raw_value)
+        defined_seen += 1
+
+        if top is not None and len(drafts) >= top:
+            # The caller asked for at most `top` NEW drafts; stop scanning and
+            # report the remainder as a count rather than emitting noise.
+            not_considered = defined_total - defined_seen + 1
+            break
+
+        if min_value is not None and value < min_value:
+            skipped.append(
+                {
+                    "event_id": event_id,
+                    "reason": "below_min_value",
+                    "detail": f"{exact_decimal_or_fraction(value)} < "
+                              f"{exact_decimal_or_fraction(min_value)}",
+                }
+            )
+            continue
+
+        if event_id in covered:
+            skipped.append(
+                {
+                    "event_id": event_id,
+                    "reason": "already_in_official_table",
+                    "detail": "a current official FMEA row already cites this event",
+                }
+            )
+            continue
+
+        fmea_id = attention_fmea_id(event_id)
+        if fmea_id in drafted:
+            state = drafted[fmea_id]
+            skipped.append(
+                {
+                    "event_id": event_id,
+                    "reason": "already_pending" if state == "proposed" else "already_decided",
+                    "detail": f"draft {fmea_id} already exists in state {state!r}; a second work "
+                              "item for the same event would only repeat it",
+                }
+            )
+            continue
+
+        drafts.append(
+            attention_draft_row(
+                model_id=model_id,
+                event_id=event_id,
+                measure=measure,
+                value_text=exact_decimal_or_fraction(value),
+                rank=defined_seen,
+                considered=defined_total,
+                run_id=run_id,
+                baseline_hash=baseline_hash,
+            )
+        )
+
+    return drafts, skipped, not_considered
 
 
 def _evidence(raw) -> tuple[EvidenceRef, ...]:

@@ -14,7 +14,9 @@ Part 1  CONTENT      Every row is read with raw `sqlite3` (no store module) and
                      stored canonical form, and the stored form must re-hash to
                      the stored content hash. One check, wide coverage: editing a
                      column, editing the stored canonical form, editing the hash,
-                     and adding or deleting a link all break it.
+                     and adding or deleting a link all break it. An official row
+                     that still carries the machine attention marker is a failure:
+                     an unfilled work item is not an approved fact.
 Part 2  PROVENANCE   No official row carries an approving identity from the
                      non-approving set (re-listed locally, on purpose, so a
                      weakened list in the store cannot silently weaken this
@@ -32,7 +34,9 @@ Part 5  STATE        Live state machine on a scratch store: a draft alone never
                      enters the official table, an agent can never decide or
                      apply, an invalid draft is recorded and stays unapprovable,
                      decide/apply are single-step, a revision must name its
-                     target, and a baseline move invalidates a pending approval.
+                     target, a baseline move invalidates a pending approval, and a
+                     marked attention work item is refused promotion even after a
+                     human approves it.
 Part 6  ROUND TRIP   Dump -> restore -> identical dump, with Parts 1-4 clean on
                      the restored copy.
 Part 7  TEETH        Mutations that must ALL be caught. A missed one means the
@@ -70,6 +74,13 @@ INFERENCE = "inference"
 CANDIDATE_STATES = frozenset({"proposed", "invalid", "approved", "rejected", "applied"})
 DECIDED_STATES = frozenset({"approved", "rejected", "applied"})
 
+# Also re-listed locally rather than imported: a machine-generated attention item
+# is a WORK ITEM whose descriptive fields are unfilled. It must never stand in the
+# official table as an approved fact, and if this file imported the production
+# marker it could not notice the marker being weakened.
+ATTENTION_MARKER = "[UNCONFIRMED]"
+ATTENTION_FIELDS = ("failure_mode", "cause", "local_effect", "system_effect")
+
 HUMAN = "J. Engineer"
 MODELS = 5
 
@@ -89,6 +100,7 @@ COVERAGE = {
     "pending_candidates": 0,
     "resolved_links": 0,
     "storage_value_scans": 0,
+    "attention_drafts": 0,
     "refusals": {},
 }
 
@@ -256,6 +268,21 @@ def audit_population(db_path: Path, label: str, *, count_coverage: bool = True) 
             recomputed = independent_fmea_hash(stored)
             if recomputed != row["content_hash"]:
                 fail(f"{tag}: canonical form re-hashes to {recomputed[:12]}…, not {row['content_hash'][:12]}…")
+
+            # --- Part 1b: an unfinished work item must never stand as a fact
+            unfinished = [
+                field for field in ATTENTION_FIELDS
+                if ATTENTION_MARKER in (stored.get(field) or "")
+            ]
+            if unfinished:
+                # There is no legitimate path to this: the store refuses to apply
+                # a marked draft, so a marked official row means a bypassed guard
+                # or an out-of-band edit. An unfilled work item must never stand
+                # as an approved fact (§110).
+                fail(
+                    f"{tag}: the official row still carries the machine attention placeholder "
+                    f"({unfinished}); an unfilled work item is not an approved fact"
+                )
 
             # --- Part 2: provenance and the human gate
             if row["source"] not in SOURCES:
@@ -456,6 +483,34 @@ def mutate_candidate_canonical(conn: sqlite3.Connection) -> None:
     )
 
 
+def mutate_plant_attention_row(conn: sqlite3.Connection) -> None:
+    """Turn a current official row into a *consistent* attention placeholder.
+
+    Every derived artifact is rewritten (columns, canonical form, hash), so the
+    hash and column checks all agree and the ONLY thing left wrong is that an
+    unfilled work item is standing as an approved fact.
+    """
+    row = conn.execute(
+        "SELECT model_id, fmea_id, version, canonical_json FROM fmea_rows"
+        " WHERE superseded=0 ORDER BY model_id, fmea_id LIMIT 1"
+    ).fetchone()
+    canonical = json.loads(row["canonical_json"])
+    canonical["cause"] = f"{ATTENTION_MARKER} 失效原因待填写"
+    conn.execute(
+        "UPDATE fmea_rows SET canonical_json=?, content_hash=?, cause=?"
+        " WHERE model_id=? AND fmea_id=? AND version=?",
+        (
+            json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+            hashlib.sha256(
+                json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                .encode("utf-8")
+            ).hexdigest(),
+            canonical["cause"],
+            row["model_id"], row["fmea_id"], row["version"],
+        ),
+    )
+
+
 MUTATIONS: list[tuple[str, object]] = [
     ("a row's content hash is edited",
      "UPDATE fmea_rows SET content_hash='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'"),
@@ -484,6 +539,8 @@ MUTATIONS: list[tuple[str, object]] = [
      "UPDATE fmea_candidates SET state='approved', decided_by='copilot'"),
     ("an applied candidate points at a version that does not exist",
      "UPDATE fmea_candidates SET applied_version=999 WHERE state='applied'"),
+    ("an unfilled attention work item is promoted to the official table",
+     mutate_plant_attention_row),
     ("a float-capable column appears in the schema", "CREATE TABLE extra_metric(level REAL)"),
     ("a REAL value is stored",
      "CREATE TABLE raw_box(v); INSERT INTO raw_box(v) VALUES (0.5)"),
@@ -539,6 +596,33 @@ def row_payload(model_id, fmea_id, events, *, source="human", note=None, **overr
         payload["inference_note"] = note
     payload.update(overrides)
     return payload
+
+
+def attention_row(model_id, event_id):
+    """An attention draft built HERE, not by calling the production generator.
+
+    The point of the check is the contract — a marked work item must be refused
+    promotion — so the verifier states that contract itself instead of echoing
+    whatever the production builder happens to produce today.
+    """
+    return {
+        "fmea_id": f"FMEA-ATTN-{event_id}",
+        "model_id": model_id,
+        "component_id": "COMPONENT-UNASSIGNED",
+        "function_id": "FUNCTION-UNASSIGNED",
+        "failure_mode": f"{ATTENTION_MARKER} failure mode to be written (event {event_id})",
+        "cause": f"{ATTENTION_MARKER} cause to be written",
+        "local_effect": f"{ATTENTION_MARKER} local effect to be written",
+        "system_effect": f"{ATTENTION_MARKER} system effect to be written",
+        "controls": [],
+        "evidence": [],
+        "requirement_ids": [],
+        "linked_event_ids": [event_id],
+        "source": INFERENCE,
+        "certainty": "generated from an importance ranking, unconfirmed",
+        "inference_note": f"flagged by the importance ranking of a run against {event_id}; every "
+                          "descriptive field is unfilled and must be written by a human",
+    }
 
 
 def verify_state_machine(tmp: Path) -> None:
@@ -671,6 +755,31 @@ def verify_state_machine(tmp: Path) -> None:
             "state: apply an approval from before a baseline move", "BASELINE_CONFLICT",
             lambda: repo.apply_fmea_candidate("D7", reviewer=HUMAN),
         )
+
+        # attention items: a ranking may drive DRAFTS, never facts
+        atn_id = f"FMEA-ATTN-{first}"
+        atn = repo.propose_fmea_candidate(
+            candidate_id="ATT-1", raw_row=attention_row("SM", first),
+            expected_baseline_hash=repo.current_baseline_hash("SM"), proposed_by="agent",
+        )
+        bump("attention_drafts")
+        if atn["state"] != "proposed":
+            fail(f"state: a marked attention draft was not accepted as a draft ({atn['state']!r})")
+        if any(r["fmea_id"] == atn_id for r in repo.list_fmea_rows("SM")):
+            fail("state: a draft alone put an attention row in the official table")
+        repo.decide_fmea_candidate("ATT-1", approve=True, reviewer=HUMAN)
+        expect_refusal(
+            "state: promote an unfilled attention work item", "FMEA_PLACEHOLDER",
+            lambda: repo.apply_fmea_candidate("ATT-1", reviewer=HUMAN),
+        )
+        if repo.get_fmea_row("SM", atn_id) is not None:
+            fail("state: a refused attention promotion still wrote a row")
+        # the generator reads this to stay quiet instead of nagging: the state of
+        # an existing draft must be visible for the same fmea_id
+        if repo.drafted_fmea_states("SM").get(atn_id) != "approved":
+            fail("state: an existing attention draft is invisible to the generator")
+        if repo.verify() != []:
+            fail(f"state: attention drafts made verify() unclean: {repo.verify()}")
 
         # unknown subjects and malformed input are refused, never coerced
         expect_refusal(
@@ -877,6 +986,8 @@ def main() -> int:
     print(f"  many-to-many proof    : {COVERAGE['events_cited_by_many_rows']} events cited by >1 row, "
           f"{COVERAGE['rows_citing_many_events']} rows citing >1 event")
     print(f"  machine-inferred rows : {COVERAGE['inference_rows']} (each still states what is unconfirmed)")
+    print(f"  attention drafts      : {COVERAGE['attention_drafts']} marked work items "
+          "(refused promotion, custom text)")
     print(f"  candidates            : {COVERAGE['candidate_rows']} "
           f"({COVERAGE['applied_candidates']} applied, {COVERAGE['rejected_candidates']} rejected, "
           f"{COVERAGE['invalid_candidates']} invalid, {COVERAGE['pending_candidates']} pending)")
@@ -898,7 +1009,7 @@ def main() -> int:
             "official_rows", "superseded_rows", "candidate_rows", "links",
             "events_cited_by_many_rows", "rows_citing_many_events", "inference_rows",
             "applied_candidates", "rejected_candidates", "invalid_candidates",
-            "pending_candidates", "resolved_links", "storage_value_scans",
+            "pending_candidates", "resolved_links", "storage_value_scans", "attention_drafts",
         )
         if COVERAGE.get(key, 0) == 0
     ]
@@ -910,6 +1021,9 @@ def main() -> int:
         return 1
     if len(COVERAGE["refusals"]) < 7:
         print(f"\nVACUOUS: only {len(COVERAGE['refusals'])} distinct refusal codes exercised")
+        return 1
+    if "FMEA_PLACEHOLDER" not in COVERAGE["refusals"]:
+        print("\nVACUOUS: the attention-placeholder guard was never exercised, so Part 5 proved nothing")
         return 1
     print("\nfmea verification: PASSED")
     return 0

@@ -123,8 +123,9 @@ q−ᵢ = Σ_{v: level(v)=i} reach(v)·P(v.low)   +  T(i)
 | 重要度四度量 | reach/差分数组（§7） | `verification/reference_importance.py`：对每个事件强制 xᵢ 后穷举其余变量 | **精确相等** |
 | 支持集 | 图上"该层有节点" | `reference_importance.py`：真值表仅差一位的行配对比较 | **精确相等** |
 | 库内数值与 stale 标记 | 结构化列 + `payload_json` 两路序列化 | `verification/run_store_verification.py`：raw sqlite3 读回，用 2^n oracle **重新推导**，并独立重算基线哈希与 stale | **精确相等** |
+| FMEA 行规范形式与哈希 | `domain/fmea.py` 的 `canonical_fmea_form` + SHA-256 | `verification/run_fmea_verification.py`：由**列级原值**重新实现规范化与哈希，三方比对 | **精确相等**（20 种突变全部检出） |
 
-五对实现均无共享代码路径、无共享算法。种子参考脚本 `reference/03_contracts/verify_seed_cases.py` 为开工包自带 oracle，与以上全部独立。
+六对实现均无共享代码路径、无共享算法。种子参考脚本 `reference/03_contracts/verify_seed_cases.py` 为开工包自带 oracle，与以上全部独立。
 
 ## 11. 持久化、基线与并发（`store/`）
 
@@ -196,9 +197,22 @@ FMEA 基础表承载**失效模式、原因、局部/系统影响、现有控制
 - `fmea trace --dangling` 与 `status().dangling_fmea_links` **报告并计数**它
 - `store verify` **不**把它判为失败（否则一次合法的模型变更会读作库损坏，掩盖真正的完整性问题）
 
-### 12.8 独立验证
+### 12.8 重要度驱动的关注项（`domain/fmea.py::plan_attention_drafts`）
 
-`verification/run_fmea_verification.py` 不 import store，用 raw `sqlite3` 从**列级原值**重建对象、**重新实现**规范化与 SHA-256，三方比对（列 ↔ `canonical_json` ↔ `content_hash`）；在临时库上独立复跑状态机；并以 **19 种突变**证明这些检查真的会失败。判据**逐值精确相等、无容差**。
+重要度排序可以**驱动** FMEA 工作，但不能**替代**它。`plan_attention_drafts()` 是纯函数（不碰存储），把一份已排序的重要度表变成关注项草稿：
+
+1. **排序与过滤全程走精确有理数**：输入表由仓储按 `Fraction` 排好序（不是文本序）；`--min-value` 也以 `Fraction` 比较，故 `1/3` 不会被 `0.333` 混过。
+2. **未定义度量直接跳过**（`measure_is_undefined`）——`null` 不是关注信号。
+3. **去噪靠两张集合**：`covered_event_ids`（当前正式行已引用的事件）与 `drafted_fmea_states`（该 `fmea_id` 已有草稿及其状态）。命中即跳过并记录理由，因此重复生成是空操作，不会对着已决事项反复唠叨。
+4. **`top` 只计新增草稿**：已覆盖/已起草的不占名额；提前跳出时把"未扫描的剩余条数"作为计数如实返回，而不是补一堆无意义的跳过项。
+5. **定量理由写入 `inference_note`**：度量名 + 精确值 + 可比事件中的排名 + `run_id` + 基线哈希前 12 位。排名只在**可比**（度量有定义）事件中计算。
+6. **不可知的字段一律打标**：四个描述字段以 `[UNCONFIRMED]` 开头，组件/功能置 `*-UNASSIGNED`，控制/证据/要求为空。生成器**不编造任何工程内容**。
+
+对应的存储侧闸门：`apply_fmea_candidate` 检测规范形式是否仍带标记，带则 `FMEA_PLACEHOLDER` 拒绝；`_verify_fmea` 另查"正式表里是否出现带标记的行"（与生成器无关的兜底，防止绕过闸门或带外改写）。
+
+### 12.9 独立验证
+
+`verification/run_fmea_verification.py` 不 import store，用 raw `sqlite3` 从**列级原值**重建对象、**重新实现**规范化与 SHA-256，三方比对（列 ↔ `canonical_json` ↔ `content_hash`）；在临时库上独立复跑状态机（含"带标记的关注项被批准后仍无法入表"）；并以 **20 种突变**证明这些检查真的会失败。判据**逐值精确相等、无容差**。标记字符串在本文件中**另行列出**（不从生产代码 import），否则标记被悄悄改弱时这条检查无法察觉。
 
 ## 13. 已知限制
 
@@ -209,4 +223,5 @@ FMEA 基础表承载**失效模式、原因、局部/系统影响、现有控制
 - 存储为**单写者**模型：靠写入时校验预期基线实现乐观并发，不做行级锁；多写者阶段在此扩展
 - 变更管理只覆盖"提案 → 决定 → 应用"的最小闭环，无结构化 patch 语言（当前提案即一份完整模型）；无回退命令（回退＝再提案一次旧语义）
 - FMEA 基础表**不含**严重度/发生度/探测度/RPN，不做风险排序（FMECA/FMEDA 不在范围）；悬空关联只报告不自动修复
+- 引擎**不撰写** FMEA 内容：重要度只能产出带标记的**工作项**，四个描述字段必须由人填写；带标记的行永远无法入表，也不存在"自动补全失效模式"的路径
 - 单线程；未做原生加速（规划中按实测瓶颈决定）

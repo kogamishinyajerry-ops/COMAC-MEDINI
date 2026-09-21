@@ -24,7 +24,8 @@
 | **FMEA 修订不可变** | ✅ 已执行 | 2 条被取代行的内容字节不变，仅 `superseded`/`superseded_by_version` 变化；后继版本必存在且更大；同名至多一个当前版本 |
 | **FMEA 追溯多对多** | ✅ 已执行 | 34 条关联（26 命中 / 8 悬空）由规范形式与关联表**双向**比对；悬空关联**报告并计数**，不判为完整性失败 |
 | **FMEA 状态机** | ✅ 已执行 | 独立复跑候选全生命周期：未批准不得应用、机器无批准权、已批准后基线移动即失效、非法草稿被记录为 `invalid`、修订必指名目标版本 |
-| **FMEA 突变测试** | ✅ 已执行 | 19 种篡改（改哈希/改规范形式/改标量列/改控制项/改需求/增删关联行/清空推断说明/非人类批准/无批准人/断后继链/植入第二当前版本/清空基线锚/改候选规范形式/非法状态/非人类决定/应用指向不存在版本/加 REAL 列/存 REAL）**全部被检出** |
+| **FMEA 突变测试** | ✅ 已执行 | 20 种篡改（改哈希/改规范形式/改标量列/改控制项/改需求/增删关联行/清空推断说明/非人类批准/无批准人/断后继链/植入第二当前版本/清空基线锚/改候选规范形式/非法状态/非人类决定/应用指向不存在版本/**把未填写的关注项晋升入表**/加 REAL 列/存 REAL）**全部被检出** |
+| **关注项不得成为事实** | ✅ 已执行 | 带 `[UNCONFIRMED]` 标记的草稿被人类批准后，`apply` 仍以 `FMEA_PLACEHOLDER` 拒绝且正式表零写入；正式表若出现带标记行（绕过闸门或带外改写）即判失败 |
 | **FMEA 存储无浮点审计** | ✅ 已执行 | 115 个新增表值 `typeof()` 扫描，零 REAL（与存储层同法） |
 | 第三方差分 | ❌ 未执行 | SCRAM 评估列为后续项（许可/GPL 审查先行） |
 | 专家 Gold Case | ❌ 未执行 | 需业务专家与脱敏模型（依赖启动会决策） |
@@ -35,7 +36,7 @@
 
 ```text
 $ python -m pytest tests/ -q                     # venv Python 3.13.12 + pytest 9.1.1
-141 passed in 23.6s
+226 passed in ~37s    （含 test_fmea.py 85 项）
 
 $ python verification/run_cross_check.py         # 结构：标准库 Python 3.13.12
 cross-check: 210/210 passed
@@ -82,18 +83,19 @@ store verification: PASSED
 
 $ python verification/run_fmea_verification.py   # FMEA：原始列独立重建 + 重哈希
 mutation check (the checks above must be able to fail)
-  caught   19 / 19 tamperings
+  caught   20 / 20 tamperings
 fmea verification
   models                : 5 with a recorded baseline
   official rows         : 15 current, 2 superseded (all re-hashed from raw columns)
   links checked         : 34 (26 resolved, 8 dangling — reported, not repaired)
   many-to-many proof    : 8 events cited by >1 row, 12 rows citing >1 event
   machine-inferred rows : 5 (each still states what is unconfirmed)
+  attention drafts      : 1 marked work items (refused promotion, custom text)
   candidates            : 20 (17 applied, 1 rejected, 1 invalid, 1 pending)
   storage values scanned: 115 (SQLite typeof — zero REAL expected)
   refusals triggered    : APPROVAL_AUTHORITYx2, BASELINE_CONFLICTx1, FMEA_NOT_FOUNDx2,
-                          FMEA_REVISION_CONFLICTx4, FMEA_STATEx4, MODEL_NOT_FOUNDx1,
-                          STORE_BAD_ARGUMENTx1
+                          FMEA_PLACEHOLDERx1, FMEA_REVISION_CONFLICTx4, FMEA_STATEx4,
+                          MODEL_NOT_FOUNDx1, STORE_BAD_ARGUMENTx1
   population problems   : 0
 fmea verification: PASSED
 
@@ -121,6 +123,20 @@ $ python run.py fmea trace     <db> --component C01           → 该组件的�
 $ python run.py fmea trace     <db> --dangling                → 悬空关联（基线移动后失联）
 $ python run.py fmea apply     … （批准后基线被移动）           → BASELINE_CONFLICT;   exit 2
 $ python run.py store  verify  store.sqlite                   → problems=[]（悬空关联不算损坏）; exit 0
+
+$ python run.py fmea propose-from-importance <db> --run r1 --top 2
+                                                              → 生成 2 条关注项草稿；正式表仍为空
+$ python run.py fmea propose-from-importance <db> --run r1 --top 2
+                                                              → 再跑：proposed=0，全部 already_pending
+$ python run.py fmea propose-from-importance <db> --run r1 --min-value 0.9
+                                                              → 按精确有理数过滤；proposed=1
+$ python run.py fmea propose-from-importance <db> --run r1 --by risk_reduction_worth
+                                                              → 未定义的 RRW 跳过并注明 measure_is_undefined
+$ python run.py fmea propose-from-importance <db> --run r1（该 run 已被取代）
+                                                              → BASELINE_NOT_CURRENT; exit 2
+$ python run.py fmea decide    <db> ATTN-r1-A --approve --reviewer JerryKogami → approved
+$ python run.py fmea apply     <db> ATTN-r1-A --reviewer JerryKogami
+                                                              → FMEA_PLACEHOLDER;    exit 2（未填写不得入表）
 
 $ python run.py validate <repairable:true>      → RATE_UNSUPPORTED; exit 3
 $ python run.py validate <模型 weibull>          → RATE_UNSUPPORTED; exit 3
@@ -251,13 +267,15 @@ FMEA 的"正确性"同样不能靠"自己和自己一致"。`verification/run_fm
 | 修订链 | `superseded` / `superseded_by_version` | 后继存在且版本更大；同名至多一个当前版本 |
 | 追溯完整性 | `fmea_links` ↔ `canonical_json.linked_event_ids` | 双向集合比对；对当前基线事件集解析，悬空项**返回**而非失败 |
 | 无浮点 | 三张 FMEA 表 | SQLite `typeof()` 逐值扫描 |
-| 状态机 | 候选生命周期 | 在**临时库**上独立复跑，7 类拒绝码逐一实测触发 |
+| **关注项标记** | `canonical_json` 的四个描述字段 | 标记字符串**在本文件内另行列出**（不 import 生产常量）；任一正式行带标记即失败 |
+| 状态机 | 候选生命周期 | 在**临时库**上独立复跑，8 类拒绝码逐一实测触发（含"带标记的关注项被批准后仍被拒绝晋升"） |
+| 生成器降噪依据 | `covered_event_ids` / `drafted_fmea_states` | 在临时库上一致断言：草稿一旦存在，生成器必须能看见它（否则会重复唠叨） |
 
 判据同样**逐值精确相等、无容差**：FMEA 侧不含超越函数，任何差异都是缺陷。
 
 ### 突变测试：证明这些 FMEA 检查真的会失败
 
-每次运行对一份副本施加 **19 种**篡改，要求全部被检出：
+每次运行对一份副本施加 **20 种**篡改，要求全部被检出：
 
 | 篡改 | 被哪条检查抓住 |
 | --- | --- |
@@ -278,14 +296,15 @@ FMEA 的"正确性"同样不能靠"自己和自己一致"。`verification/run_fm
 | 把候选状态改为未知值 | 该行无法回溯到 `applied` 候选 |
 | 用非批准身份决定候选 | 同上 |
 | 让 `applied` 候选指向不存在的版本 | "应用版本不存在" |
+| **把未填写的关注项晋升入表**（列、规范形式、哈希**一致改写**，只留标记这一处错误） | "正式行仍带机器关注项占位符" |
 | 在 schema 中加一个 REAL 列 | 声明类型审计 |
 | 存入一个 REAL 值 | `typeof()` 逐值扫描 |
 
-实测 **19/19 全部检出**。任何一条"未被检出"都会让脚本判为失败——因为那意味着对应检查是装饰性的。
+实测 **20/20 全部检出**。任何一条"未被检出"都会让脚本判为失败——因为那意味着对应检查是装饰性的。
 
 ### 覆盖度与真空度闸门（说明 FMEA 的绿不是空绿）
 
-脚本在**结束时强制自检**：拒绝码种类必须 ≥7、悬空关联集合必须非空，否则直接判失败（防止"温室种群"把绿变成空绿）。本次实测：5 个含基线模型、15 当前行 + 2 被取代行、34 条关联（26 命中 / **8 悬空**）、8 个事件被多于一行引用、12 行引用多于一个事件、5 条机器推断行、20 个候选（17 applied / 1 rejected / 1 invalid / 1 pending）、115 个存储值扫描、7 类拒绝码实际触发。
+脚本在**结束时强制自检**：拒绝码种类必须 ≥7、悬空关联集合必须非空、关注项计数必须非零、且 `FMEA_PLACEHOLDER` 必须被实际触发过，否则直接判失败（防止"温室种群"把绿变成空绿）。本次实测：5 个含基线模型、15 当前行 + 2 被取代行、34 条关联（26 命中 / **8 悬空**）、8 个事件被多于一行引用、12 行引用多于一个事件、5 条机器推断行、1 个关注项工单（被拒绝晋升）、20 个候选（17 applied / 1 rejected / 1 invalid / 1 pending）、115 个存储值扫描、**8 类**拒绝码实际触发（含 `FMEA_PLACEHOLDER`）。
 
 ### 一个由测试抓出的真实缺陷（FMEA）
 
@@ -293,7 +312,7 @@ FMEA 的"正确性"同样不能靠"自己和自己一致"。`verification/run_fm
 
 同样在设计 `apply_fmea_candidate` 时发现：`certainty` 与 `inference_note` 被**刻意排除在哈希之外**（描述性），因此无法从规范形式反推——若不在提案时把 provenance 一并落盘，批准应用后会**静默丢失**推断说明。修复：候选表新增 `proposed_provenance_json` 列，提案时存入 `fmea_provenance(row)`，应用时读回。
 
-## FMEA 基础表不变量（tests/test_fmea.py，67 项）
+## FMEA 基础表不变量（tests/test_fmea.py，85 项）
 
 34. 身份是**稳定标识符**，不是显示名：改 `failure_mode` 文案不改 `fmea_id`，行身份不变
 35. 行 ↔ 基本事件是**多对多**：一行可关联多事件，一事件可被多行引用，**永不强制一对一**
@@ -310,6 +329,20 @@ FMEA 的"正确性"同样不能靠"自己和自己一致"。`verification/run_fm
 46. 全程 `store verify` 干净：从草稿到应用、含修订与悬空，`verify()` 始终 `problems=[]`
 47. 往返：`dump()` == `restore()`，悬空集合保持一致
 48. 未定义项从不被占位替代；无浮点列、无 REAL 值
+
+**关注项（重要度驱动）不变量：**
+
+49. 关注项 `fmea_id` 由**事件 id 派生**（`FMEA-ATTN-<event>`），同一事件重复生成映射到同一身份，不产生第二份工单
+50. 关注项的**定量理由精确可复现**：`inference_note` 含度量名、精确值、可比事件中的排名、`run_id`、基线哈希前缀
+51. 关注项**不编造任何内容**：四个描述字段带 `[UNCONFIRMED]` 标记，组件/功能为 `*-UNASSIGNED`，控制/证据/要求为空
+52. **带标记的草稿即使被具名人类批准，`apply` 仍以 `FMEA_PLACEHOLDER` 拒绝**，且正式表零写入
+53. 人类回答工单的方式是**为同一 `fmea_id` 另行提出真实内容**；原工单草稿保持 `proposed`，不被顺带晋升
+54. **重复生成是空操作**：已存在草稿（`already_pending` / `already_decided`）或事件已被正式行引用（`already_in_official_table`）一律跳过并给出理由
+55. `--top` **只计新增草稿**；已覆盖/已起草的不占名额；跳出时把未扫描的剩余条数**作为计数如实返回**
+56. `--min-value` 按**精确有理数**比较（`1/3` 与 `0.3` 的排序不会被文本序弄反）；未定义度量一律跳过（`measure_is_undefined`）
+57. **过期基线不生成**：run 已落在被取代基线上时 `BASELINE_NOT_CURRENT` 拒绝，候选表零写入
+58. 生成器**不触碰正式表**：`propose-from-importance` 之后 `list_fmea_rows` 仍为空
+59. 正式表若出现带标记行（绕过闸门或带外改写）→ `verify()` 报出，且**只报这一条**（即便其余派生工件被一致改写）
 
 ## 变形测试（不变量，全部通过）
 

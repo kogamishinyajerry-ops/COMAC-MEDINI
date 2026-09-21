@@ -20,6 +20,8 @@ from .. import CONTRACT_VERSION, ENGINE_NAME, __version__
 from ..adapters.json_io import load_model, probability_to_text
 from ..domain import errors as err
 from ..domain.errors import ModelError, ResourceLimitError
+from ..domain.fmea import DEFAULT_ATTENTION_TOP, plan_attention_drafts
+from ..domain.ratnum import exact_decimal_or_fraction
 from ..domain.rate_model import INTERPRETATION as RATE_INTERPRETATION
 from ..domain.semantic_hash import semantic_model_hash
 from ..evidence.bundle import EvidenceBundle
@@ -627,7 +629,9 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
                 "method": "FMEA base table (component / function / failure mode / cause / local and "
                           "upper-level effect / controls / evidence) with many-to-many links to basic "
                           "events and to requirement ids; every row reaches the official table only "
-                          "through propose -> decide -> apply under a named human",
+                          "through propose -> decide -> apply under a named human; the importance "
+                          "ranking can drive draft attention items, which stay placeholders until a "
+                          "human writes the real content",
                 "restrictions": [
                     "base FMEA table only: no severity / occurrence / detection / RPN — those are "
                     "FMECA extensions and are not implemented",
@@ -640,6 +644,10 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
                     "links are checked against the fault-tree baseline the draft was proposed "
                     "against; a link that stops resolving after a baseline change is reported as a "
                     "traceability gap, not silently repaired or deleted",
+                    "attention items generated from an importance ranking are work items, not content: "
+                    "the engine ranks events but does not know failure modes, so every descriptive "
+                    "field is a marked placeholder and the store refuses to promote one until a human "
+                    "fills it in; generation from a superseded run is refused",
                 ],
                 "evidence_ids": [
                     "tests/test_fmea.py",
@@ -1053,6 +1061,70 @@ def cmd_fmea(args: argparse.Namespace) -> int:
             ))
             return EXIT_OK
 
+        if command == "propose-from-importance":
+            try:
+                min_value = Fraction(args.min_value) if args.min_value is not None else None
+            except (ValueError, ZeroDivisionError):
+                return _store_refusal(
+                    store_err.BAD_ARGUMENT,
+                    f"--min-value {args.min_value!r} is not a number or fraction (e.g. 0.1 or 1/10)",
+                )
+            with SqliteRepository(args.db) as repo:
+                run = repo.get_run(args.run_id)
+                if run is None:
+                    return _store_refusal(store_err.RUN_NOT_FOUND, f"no run {args.run_id!r}")
+                if run["stale"]:
+                    # The ranking came from a superseded baseline; promoting work
+                    # items from it would point at a model that no longer exists.
+                    return _store_refusal(
+                        store_err.BASELINE_NOT_CURRENT,
+                        f"run {args.run_id!r} sits on a superseded baseline "
+                        f"({run['baseline_hash'][:12]}…); re-run `analyze --db` against the current "
+                        "baseline and generate the attention items from that run",
+                    )
+                model_id = run["model_id"]
+                rows = repo.run_importance(args.run_id, by=args.by)
+                covered = repo.covered_event_ids(model_id)
+                drafted = repo.drafted_fmea_states(model_id)
+                drafts, skipped, not_considered = plan_attention_drafts(
+                    rows,
+                    model_id=model_id,
+                    measure=args.by,
+                    run_id=args.run_id,
+                    baseline_hash=run["baseline_hash"],
+                    covered_event_ids=covered,
+                    drafted_fmea_states=drafted,
+                    top=args.top,
+                    min_value=min_value,
+                )
+                proposed = [
+                    repo.propose_fmea_candidate(
+                        candidate_id=f"ATTN-{args.run_id}-{draft['linked_event_ids'][0]}",
+                        raw_row=draft,
+                        expected_baseline_hash=run["baseline_hash"],
+                        proposed_by=args.reviewer,
+                        expected_version=None,
+                        note=args.note
+                        or f"attention item generated from the importance ranking of run {args.run_id}",
+                    )
+                    for draft in drafts
+                ]
+            _emit(_store_payload(
+                "fmea propose-from-importance", status="ok", run_id=args.run_id,
+                model_id=model_id, sorted_by=args.by, top=args.top,
+                min_value=None if min_value is None else exact_decimal_or_fraction(min_value),
+                proposed=len(proposed),
+                candidates=[c["candidate_id"] for c in proposed],
+                skipped=skipped,
+                not_considered=not_considered,
+                scanned=sorted({row["event_id"] for row in rows}),
+                covered_events=sorted(covered),
+                note="an attention item is a WORK ITEM, not a fact: the engine ranks events but "
+                     "does not know a failure mode. Every descriptive field is a marked placeholder, "
+                     "the store refuses to promote one, and only a named human can write the real row",
+            ))
+            return EXIT_OK
+
         raise StoreError(store_err.BAD_ARGUMENT, f"unknown fmea command {command!r}")
     except StoreError as exc:
         return _store_refusal(exc.code, exc.message)
@@ -1246,6 +1318,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_f.add_argument("db")
     p_f.add_argument("candidate_id")
     p_f.add_argument("--reviewer", default=None)
+    p_f.set_defaults(func=cmd_fmea)
+
+    p_f = fmea_sub.add_parser(
+        "propose-from-importance",
+        help="turn an importance ranking into draft attention items (never approved by this command)",
+    )
+    p_f.add_argument("db")
+    p_f.add_argument("--run", dest="run_id", required=True,
+                     help="the run whose stored importance ranking to use")
+    p_f.add_argument("--by", choices=IMPORTANCE_SORT_KEYS, default="fussell_vesely")
+    p_f.add_argument("--top", type=int, default=DEFAULT_ATTENTION_TOP,
+                     help=f"propose at most this many NEW drafts (default {DEFAULT_ATTENTION_TOP}); "
+                          "events already covered or already drafted are skipped, not counted")
+    p_f.add_argument("--min-value", default=None,
+                     help="only events whose exact measure is >= this value (e.g. 0.1 or 1/10)")
+    p_f.add_argument("--reviewer", default="agent",
+                     help="who proposes (default: agent — an agent may propose but never approve)")
+    p_f.add_argument("--note", default=None)
     p_f.set_defaults(func=cmd_fmea)
 
     p_f = fmea_sub.add_parser("trace", help="traceability: rows by event, by component, or gaps")

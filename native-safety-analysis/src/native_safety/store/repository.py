@@ -44,6 +44,7 @@ from ..domain.fmea import (
     FMEA_SOURCES,
     INFERENCE_SOURCE,
     canonical_fmea_form,
+    canonical_has_attention_placeholder,
     fmea_content_hash,
     fmea_provenance,
     hash_canonical_fmea,
@@ -707,6 +708,39 @@ class SqliteRepository:
         canonical = json.loads(row["c"])
         return frozenset(event["id"] for event in canonical.get("basic_events", []))
 
+    def covered_event_ids(self, model_id: str) -> frozenset[str]:
+        """Events already cited by a CURRENT official row.
+
+        Superseded versions do not count: a revision replaces the claim, so the
+        coverage question is always asked of the live table.
+        """
+        return frozenset(
+            r["event_id"]
+            for r in self.conn.execute(
+                "SELECT DISTINCT l.event_id AS event_id FROM fmea_links l"
+                " JOIN fmea_rows r ON r.model_id=l.model_id AND r.fmea_id=l.fmea_id"
+                " AND r.version=l.version"
+                " WHERE l.model_id=? AND r.superseded=0",
+                (model_id,),
+            )
+        )
+
+    def drafted_fmea_states(self, model_id: str) -> dict[str, str]:
+        """fmea_id -> state of its most recent draft, so a generator can stay quiet.
+
+        A draft that already exists (whether waiting, rejected or applied) is a
+        reason NOT to propose the same work item again; re-proposing would only
+        nag a human who has already decided.
+        """
+        states: dict[str, str] = {}
+        for row in self.conn.execute(
+            "SELECT fmea_id, state FROM fmea_candidates WHERE model_id=?"
+            " ORDER BY created_utc, candidate_id",
+            (model_id,),
+        ):
+            states[row["fmea_id"]] = row["state"]
+        return states
+
     def current_fmea_version(self, model_id: str, fmea_id: str) -> int | None:
         row = self.conn.execute(
             "SELECT MAX(version) AS v FROM fmea_rows"
@@ -895,6 +929,17 @@ class SqliteRepository:
             raise StoreError(
                 errors.INTEGRITY,
                 f"stored draft {candidate_id!r} no longer hashes to its recorded hash; refusing to apply",
+            )
+        # A draft that is still a machine-generated attention placeholder names
+        # an event and its importance, but nothing about the failure itself.
+        # Promoting it would record an inference as a settled fact (§110), so it
+        # is refused until a human fills the content in and re-proposes.
+        if canonical_has_attention_placeholder(canonical):
+            raise StoreError(
+                errors.FMEA_PLACEHOLDER,
+                f"FMEA draft {candidate_id!r} is still a machine-generated attention placeholder "
+                "(its failure mode / cause / effects are unfilled). It may not enter the official "
+                "table: write the real content and propose that row instead",
             )
         linked = tuple(canonical["linked_event_ids"])
         event_ids = self.baseline_event_ids(model_id) or frozenset()
@@ -1263,6 +1308,14 @@ class SqliteRepository:
 
             if record["source"] not in FMEA_SOURCES:
                 problems.append(f"{tag}: unknown source {record['source']!r}")
+            if canonical is not None and not record["superseded"] and canonical_has_attention_placeholder(canonical):
+                # The apply path refuses these, so reaching the live table means
+                # either a bypassed guard or an out-of-band edit. Either way an
+                # unfinished work item is masquerading as an approved fact.
+                problems.append(
+                    f"{tag}: the current row still carries the machine attention placeholder; "
+                    "an unfilled work item must never stand as an approved fact"
+                )
             if record["source"] == INFERENCE_SOURCE and not (record["inference_note"] or "").strip():
                 problems.append(
                     f"{tag}: a machine-inferred row was promoted without a record of what "

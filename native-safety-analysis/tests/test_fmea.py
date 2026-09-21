@@ -14,6 +14,7 @@ import dataclasses
 import json
 import sqlite3
 import sys
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -26,9 +27,16 @@ from native_safety.cli.main import main  # noqa: E402
 from native_safety.domain import errors as err  # noqa: E402
 from native_safety.domain.errors import ModelError  # noqa: E402
 from native_safety.domain.fmea import (  # noqa: E402
+    ATTENTION_MARKER,
+    attention_draft_row,
+    attention_fmea_id,
     canonical_fmea_form,
+    canonical_has_attention_placeholder,
     fmea_content_hash,
     fmea_provenance,
+    hash_canonical_fmea,
+    plan_attention_drafts,
+    row_has_attention_placeholder,
     validate_fmea_row,
 )
 from native_safety.domain.semantic_hash import semantic_model_hash  # noqa: E402
@@ -126,10 +134,10 @@ def fetch_one(db_path, sql: str) -> dict:
         conn.close()
 
 
-def corrupt(db_path, sql: str) -> None:
+def corrupt(db_path, sql: str, params: tuple = ()) -> None:
     conn = sqlite3.connect(db_path)
     try:
-        conn.execute(sql)
+        conn.execute(sql, params)
         conn.commit()
     finally:
         conn.close()
@@ -728,7 +736,275 @@ def test_capabilities_declare_fmea_verified(capsys):
     assert code == 0
     entry = next(c for c in payload["capabilities"] if c["capability_id"] == "fmea_requirements_traceability")
     assert entry["status"] == "verified"
+
+
+# --------------------------------------------------------------------------
+# attention items: the importance ranking may drive drafts, never facts
+# --------------------------------------------------------------------------
+
+
+def importance_rows(values: dict[str, str | None], measure: str = "fussell_vesely"):
+    """Stored importance rows: exact text values, already sorted by the store."""
+    ordered = sorted(
+        values.items(),
+        key=lambda kv: (kv[1] is None, -(Fraction(kv[1]) if kv[1] is not None else 0), kv[0]),
+    )
+    return [{"event_id": eid, measure: value} for eid, value in ordered]
+
+
+def build_draft(event_id="A", measure="fussell_vesely", value_text="1", rank=1, considered=3):
+    return attention_draft_row(
+        model_id="M03_repeated_event", event_id=event_id, measure=measure, value_text=value_text,
+        rank=rank, considered=considered, run_id="r1", baseline_hash="a" * 64,
+    )
+
+
+def test_attention_draft_names_the_event_and_the_reason():
+    draft = build_draft(event_id="A", value_text="6/11", rank=2, considered=3)
+    assert draft["fmea_id"] == "FMEA-ATTN-A"
+    assert draft["source"] == "inference"
+    assert draft["linked_event_ids"] == ["A"]
+    # the quantitative reason is exact and reproducible
+    assert "6/11" in draft["inference_note"]
+    assert "排第 2" in draft["inference_note"] and "3 个可比值" in draft["inference_note"]
+    assert "r1" in draft["inference_note"]
+    # nothing is fabricated: component, function and every descriptive field are unassigned
+    assert draft["component_id"] == "COMPONENT-UNASSIGNED"
+    assert draft["function_id"] == "FUNCTION-UNASSIGNED"
+    for field in ("failure_mode", "cause", "local_effect", "system_effect"):
+        assert draft[field].startswith(ATTENTION_MARKER)
+    assert draft["controls"] == [] and draft["evidence"] == [] and draft["requirement_ids"] == []
+
+
+def test_an_attention_draft_is_valid_because_it_is_explicitly_marked():
+    row = validate_fmea_row(build_draft(), known_event_ids={"A", "B", "C"})
+    assert row.is_inference
+    assert row_has_attention_placeholder(row)
+    assert canonical_has_attention_placeholder(canonical_fmea_form(row))
+    # and the marker is what makes it incomplete, not the source alone
+    settled = validate_fmea_row(row_payload(source="inference", note="text mining"))
+    assert not row_has_attention_placeholder(settled)
+
+
+def test_attention_id_is_derived_from_the_event_not_from_a_counter():
+    assert attention_fmea_id("PUMP_SEAL") == attention_fmea_id("PUMP_SEAL")
+    assert attention_fmea_id("PUMP_SEAL") != attention_fmea_id("VALVE_STICK")
+
+
+def test_plan_attention_drafts_skips_undefined_measures():
+    rows = importance_rows({"A": None, "B": "0.2", "C": "0.1"})
+    drafts, skipped, not_considered = plan_attention_drafts(
+        rows, model_id="M", measure="fussell_vesely", run_id="r1", baseline_hash="b" * 64,
+    )
+    assert [d["linked_event_ids"][0] for d in drafts] == ["B", "C"]
+    assert [(s["event_id"], s["reason"]) for s in skipped] == [("A", "measure_is_undefined")]
+    assert not_considered == 0
+    # the rank counts comparable events only, not the undefined ones
+    assert "排第 1" in drafts[0]["inference_note"] and "排第 2" in drafts[1]["inference_note"]
+    assert "2 个可比值" in drafts[0]["inference_note"]
+
+
+def test_plan_attention_drafts_top_counts_new_drafts_only():
+    rows = importance_rows({e: str(p) for e, p in (("A", "0.9"), ("B", "0.8"), ("C", "0.7"))})
+    drafts, skipped, not_considered = plan_attention_drafts(
+        rows, model_id="M", measure="fussell_vesely", run_id="r1", baseline_hash="b" * 64,
+        covered_event_ids={"A"}, top=1,
+    )
+    # A is covered, so the requested single NEW draft comes from B
+    assert [d["linked_event_ids"][0] for d in drafts] == ["B"]
+    assert [s["reason"] for s in skipped] == ["already_in_official_table"]
+    assert not_considered == 1  # C was never scanned, and that is reported as a count
+
+
+def test_plan_attention_drafts_stays_quiet_about_drafts_that_already_exist():
+    rows = importance_rows({"A": "0.9", "B": "0.8"})
+    drafts, skipped, _ = plan_attention_drafts(
+        rows, model_id="M", measure="fussell_vesely", run_id="r1", baseline_hash="b" * 64,
+        drafted_fmea_states={"FMEA-ATTN-A": "proposed", "FMEA-ATTN-B": "rejected"},
+    )
+    assert drafts == []
+    assert [(s["event_id"], s["reason"]) for s in skipped] == [
+        ("A", "already_pending"), ("B", "already_decided"),
+    ]
+
+
+def test_plan_attention_drafts_min_value_is_compared_as_an_exact_fraction():
+    rows = importance_rows({"A": "1/3", "B": "3/10"})
+    drafts, skipped, _ = plan_attention_drafts(
+        rows, model_id="M", measure="fussell_vesely", run_id="r1", baseline_hash="b" * 64,
+        min_value=Fraction(1, 3),
+    )
+    # 3/10 < 1/3 exactly; a text comparison would have got this backwards
+    assert [d["linked_event_ids"][0] for d in drafts] == ["A"]
+    assert [(s["event_id"], s["reason"]) for s in skipped] == [("B", "below_min_value")]
+
+
+def test_cli_generates_attention_drafts_without_touching_the_official_table(seeded, capsys):
+    repo, _, _ = seeded
+    code, payload = cli(
+        capsys, "fmea", "propose-from-importance", repo.path, "--run", "r1", "--top", "2",
+    )
+    assert code == 0
+    assert payload["proposed"] == 2 and payload["not_considered"] == 1
+    assert payload["scanned"] == ["A", "B", "C"]
+    assert repo.list_fmea_rows("M03_repeated_event") == []
+    assert {c["state"] for c in repo.list_fmea_candidates()} == {"proposed"}
+
+
+def test_cli_attention_generation_is_idempotent(seeded, capsys):
+    repo, _, _ = seeded
+    cli(capsys, "fmea", "propose-from-importance", repo.path, "--run", "r1", "--top", "3")
+    code, payload = cli(
+        capsys, "fmea", "propose-from-importance", repo.path, "--run", "r1", "--top", "3",
+    )
+    assert code == 0 and payload["proposed"] == 0
+    assert {s["reason"] for s in payload["skipped"]} == {"already_pending"}
+    assert len(repo.list_fmea_candidates()) == 3  # no duplicate work items
+
+
+def test_cli_attention_generation_skips_events_already_in_the_official_table(seeded, capsys):
+    repo, _, _ = seeded
+    baseline = repo.current_baseline_hash("M03_repeated_event")
+    promote(repo, "C1", row_payload("FMEA-001", links=("A",)), baseline)
+    code, payload = cli(
+        capsys, "fmea", "propose-from-importance", repo.path, "--run", "r1", "--top", "3",
+    )
+    assert code == 0
+    assert payload["covered_events"] == ["A"]
+    assert [s["reason"] for s in payload["skipped"]] == ["already_in_official_table"]
+    assert "ATTN-r1-A" not in payload["candidates"]
+
+
+def test_cli_attention_generation_uses_an_undefined_measure_to_skip(seeded, capsys):
+    repo, _, _ = seeded
+    # A is essential, so its risk reduction worth is undefined (q- = 0)
+    code, payload = cli(
+        capsys, "fmea", "propose-from-importance", repo.path, "--run", "r1",
+        "--by", "risk_reduction_worth",
+    )
+    assert code == 0
+    skipped = {s["event_id"]: s["reason"] for s in payload["skipped"]}
+    assert skipped.get("A") == "measure_is_undefined"
+    assert payload["proposed"] >= 1
+
+
+def test_a_placeholder_draft_can_be_approved_but_never_applied(seeded, capsys):
+    repo, _, _ = seeded
+    cli(capsys, "fmea", "propose-from-importance", repo.path, "--run", "r1", "--top", "1")
+    draft = repo.list_fmea_candidates()[0]["candidate_id"]
+
+    code, payload = cli(capsys, "fmea", "decide", repo.path, draft, "--approve", "--reviewer", HUMAN)
+    assert code == 0 and payload["candidate"]["state"] == "approved"
+
+    code, payload = cli(capsys, "fmea", "apply", repo.path, draft, "--reviewer", HUMAN)
+    assert code == 2 and payload["error"]["code"] == store_err.FMEA_PLACEHOLDER
+    # the work item never becomes a fact
+    assert repo.list_fmea_rows("M03_repeated_event") == []
+    assert repo.verify() == []
+
+
+def test_a_human_writes_the_real_row_under_the_same_fmea_id(seeded, capsys):
+    repo, _, tmp_path = seeded
+    baseline = repo.current_baseline_hash("M03_repeated_event")
+    cli(capsys, "fmea", "propose-from-importance", repo.path, "--run", "r1", "--top", "1")
+
+    # the human answers the work item by proposing the real content for that id
+    real = row_payload("FMEA-ATTN-A", links=("A",), source="human")
+    real["component_id"], real["function_id"] = "COMP-PUMP", "FUNC-SUPPLY"
+    row_path = write_model(tmp_path, "real.json", real)
+    code, payload = cli(
+        capsys, "fmea", "propose", repo.path, str(row_path),
+        "--candidate-id", "REAL-1", "--expected-baseline-hash", baseline, "--reviewer", HUMAN,
+    )
+    assert code == 0 and payload["candidate"]["state"] == "proposed"
+
+    cli(capsys, "fmea", "decide", repo.path, "REAL-1", "--approve", "--reviewer", HUMAN)
+    code, payload = cli(capsys, "fmea", "apply", repo.path, "REAL-1", "--reviewer", HUMAN)
+    assert code == 0 and payload["row"]["failure_mode"] == "seal leak"
+    assert repo.current_fmea_version("M03_repeated_event", "FMEA-ATTN-A") == 1
+    # the machine draft is still a draft; it never got promoted by accident
+    assert {c["state"] for c in repo.list_fmea_candidates() if c["candidate_id"] != "REAL-1"} == {
+        "proposed"
+    }
+
+
+def test_cli_attention_generation_refuses_a_superseded_run(seeded, capsys, tmp_path):
+    repo, _, tmp_path = seeded
+    old = repo.current_baseline_hash("M03_repeated_event")
+    moved = load_model(
+        write_model(
+            tmp_path, "moved.json",
+            model_payload([("A", "0.1"), ("B", "0.2")],
+                          [{"id": "TOP", "kind": "AND", "inputs": ["A", "B"]}]),
+        )
+    )
+    repo.register_model_baseline(moved, actor=HUMAN, expected_baseline_hash=old)
+    code, payload = cli(
+        capsys, "fmea", "propose-from-importance", repo.path, "--run", "r1", "--top", "1",
+    )
+    # a ranking from a superseded baseline would point at a model that is gone
+    assert code == 2 and payload["error"]["code"] == store_err.BASELINE_NOT_CURRENT
+    assert repo.list_fmea_candidates() == []
+
+
+def test_cli_attention_generation_refuses_an_unknown_run(seeded, capsys):
+    repo, _, _ = seeded
+    code, payload = cli(capsys, "fmea", "propose-from-importance", repo.path, "--run", "nope")
+    assert code == 2 and payload["error"]["code"] == store_err.RUN_NOT_FOUND
+
+
+def test_cli_attention_generation_rejects_a_non_numeric_min_value(seeded, capsys):
+    repo, _, _ = seeded
+    code, payload = cli(
+        capsys, "fmea", "propose-from-importance", repo.path, "--run", "r1", "--min-value", "high",
+    )
+    assert code == 2 and payload["error"]["code"] == store_err.BAD_ARGUMENT
+
+
+def test_cli_attention_generation_filters_by_min_value(seeded, capsys):
+    repo, _, _ = seeded
+    code, payload = cli(
+        capsys, "fmea", "propose-from-importance", repo.path, "--run", "r1", "--min-value", "0.9",
+    )
+    assert code == 0
+    # M03 has FV = 1 (A), 7/22 (B), 6/11 (C): only A clears 0.9
+    assert payload["proposed"] == 1 and payload["candidates"] == ["ATTN-r1-A"]
+
+
+def test_verify_flags_a_placeholder_that_reached_the_official_table(seeded):
+    repo, _, _ = seeded
+    baseline = repo.current_baseline_hash("M03_repeated_event")
+    promote(repo, "C1", row_payload("FMEA-001", links=("A",)), baseline)
+    assert repo.verify() == []
+
+    canonical = json.loads(
+        fetch_one(repo.path, "SELECT canonical_json FROM fmea_rows")["canonical_json"]
+    )
+    canonical["cause"] = f"{ATTENTION_MARKER} 失效原因待填写"
+    # rewrite every derived artifact consistently, so the ONLY thing left wrong
+    # is the placeholder itself — otherwise the hash check would mask the point
+    corrupt(
+        repo.path,
+        "UPDATE fmea_rows SET canonical_json=?, content_hash=?, cause=?",
+        (
+            json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+            hash_canonical_fmea(canonical),
+            canonical["cause"],
+        ),
+    )
+    problems = repo.verify()
+    assert len(problems) == 1 and "attention placeholder" in problems[0]
+
+
+def test_capabilities_declare_fmea_verified(capsys):
+    code, payload = cli(capsys, "capabilities")
+    assert code == 0
+    entry = next(
+        c for c in payload["capabilities"] if c["capability_id"] == "fmea_requirements_traceability"
+    )
+    assert entry["status"] == "verified"
     assert entry["evidence_ids"] == [
         "tests/test_fmea.py",
         "verification/run_fmea_verification.py",
     ]
+    assert any("attention" in r for r in entry["restrictions"])
