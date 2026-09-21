@@ -53,6 +53,7 @@ from ..domain.fmea import (
 )
 from ..domain.model import StaticFtaModel
 from ..domain.model_diff import change_summary, diff_canonical_forms
+from ..domain.patch import apply_patch, patch_preview
 from ..domain.ratnum import exact_decimal, exact_decimal_or_fraction
 from ..domain.semantic_hash import (
     canonical_model_form,
@@ -572,6 +573,64 @@ class SqliteRepository:
     def get_review(self, review_id: str) -> dict | None:
         row = self.conn.execute("SELECT * FROM reviews WHERE review_id=?", (review_id,)).fetchone()
         return dict(row) if row else None
+
+    def patch_review(
+        self,
+        *,
+        review_id: str,
+        model_id: str,
+        expected_baseline_hash: str,
+        ops: list,
+        proposed_by: str,
+        note: str | None = None,
+    ) -> dict:
+        """Turn an object-level patch into an ordinary review proposal.
+
+        The patch applies to the CURRENT baseline's canonical form, read from
+        the store — never from a caller-supplied model file. The patched form
+        is validated at the canonical level (references, cycles, semantics)
+        and recorded as a plain `proposed` review, so decide/apply and every
+        existing guard work unchanged. An invalid patch is still recorded,
+        with state `invalid` and the reason, like any other proposal.
+        """
+        observed = self.current_baseline_hash(model_id)
+        if expected_baseline_hash != observed:
+            raise StoreError(
+                errors.BASELINE_CONFLICT,
+                f"patch was written against baseline {expected_baseline_hash[:12]}… but the store "
+                f"holds {(observed or '(none)')[:12]}… for model {model_id!r}; rebase the patch",
+            )
+        current_canonical = None
+        if observed is not None:
+            row = self.conn.execute(
+                "SELECT canonical_json FROM baselines WHERE baseline_hash=?", (observed,)
+            ).fetchone()
+            if row is not None:
+                current_canonical = json.loads(row["canonical_json"])
+
+        now = _utc_now()
+        try:
+            patched = apply_patch(current_canonical, ops)
+        except ModelError as exc:
+            state, proposed_hash, canonical_json = "invalid", None, None
+            code, message = exc.code, exc.message
+        else:
+            state, code, message = "proposed", None, None
+            proposed_hash = hash_canonical_form(patched)
+            canonical_json = json.dumps(
+                patched, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            )
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO reviews(review_id, model_id, expected_baseline_hash, observed_baseline_hash,"
+                " proposed_hash, proposed_canonical_json, state, validation_code, validation_message,"
+                " note, proposed_by, created_utc)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (review_id, model_id, expected_baseline_hash, observed or "", proposed_hash,
+                 canonical_json, state, code, message,
+                 note or "object-level patch (model-patch-v1)", proposed_by, now),
+            )
+        return self.get_review(review_id)
 
     def review_impact(self, review_id: str) -> dict:
         """What applying this review would change, read from the store alone.

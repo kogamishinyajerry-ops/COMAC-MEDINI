@@ -21,6 +21,7 @@ from ..adapters.json_io import load_model, probability_to_text
 from ..domain import errors as err
 from ..domain.errors import ModelError, ResourceLimitError
 from ..domain.fmea import DEFAULT_ATTENTION_TOP, plan_attention_drafts
+from ..domain.patch import patch_preview
 from ..domain.ratnum import exact_decimal_or_fraction
 from ..domain.rate_model import INTERPRETATION as RATE_INTERPRETATION
 from ..domain.semantic_hash import semantic_model_hash
@@ -680,6 +681,15 @@ def _load_or_fail(path: str) -> tuple[object | None, tuple[str, str] | None]:
         return None, (exc.code, exc.message)
 
 
+def _load_patch_ops(path: str) -> list:
+    """Read a patch file: a JSON array of operations (never an object)."""
+    text = Path(path).read_text(encoding="utf-8")
+    data = json.loads(text)
+    if not isinstance(data, list):
+        raise json.JSONDecodeError("a patch file is a JSON array of operations", text, 0)
+    return data
+
+
 def _model_refusal(code: str, message: str) -> int:
     _emit({
         **_STORE_ENVELOPE, "status": "failed",
@@ -929,6 +939,60 @@ def cmd_review(args: argparse.Namespace) -> int:
                 note="the proposal is built from the baseline table's own canonical form, never "
                      "from a caller-supplied file; decide and apply it like any other review "
                      "(a named human, two explicit steps)",
+            ))
+            return EXIT_OK
+
+        if command == "patch-preview":
+            try:
+                ops = _load_patch_ops(args.patch)
+            except (OSError, json.JSONDecodeError) as exc:
+                return _store_refusal("STORE_IO" if isinstance(exc, OSError) else err.PATCH_OP, str(exc))
+            with SqliteRepository(args.db) as repo:
+                current = repo.current_baseline_hash(args.model_id)
+                if current is None:
+                    return _store_refusal(
+                        store_err.MODEL_NOT_FOUND,
+                        f"model {args.model_id!r} has no baseline in this store; a patch edits the "
+                        "current baseline, so analyze the model first",
+                    )
+                row = repo.conn.execute(
+                    "SELECT canonical_json FROM baselines WHERE baseline_hash=?", (current,)
+                ).fetchone()
+                canonical = json.loads(row["canonical_json"])
+                try:
+                    preview = patch_preview(canonical, ops)
+                except ModelError as exc:
+                    return _store_refusal(exc.code, exc.message)
+            _emit(_store_payload(
+                "review patch-preview", status="ok", model_id=args.model_id,
+                against_baseline_hash=current, summary=preview["summary"], diff=preview["diff"],
+                note="read-only: nothing is recorded. The diff is between the current baseline's "
+                     "canonical form and the patched form, both computed here from the store",
+            ))
+            return EXIT_OK
+
+        if command == "patch":
+            try:
+                ops = _load_patch_ops(args.patch)
+            except (OSError, json.JSONDecodeError) as exc:
+                return _store_refusal("STORE_IO" if isinstance(exc, OSError) else err.PATCH_OP, str(exc))
+            with SqliteRepository(args.db) as repo:
+                try:
+                    record = repo.patch_review(
+                        review_id=args.review_id,
+                        model_id=args.model_id,
+                        expected_baseline_hash=args.expected_baseline_hash,
+                        ops=ops,
+                        proposed_by=args.reviewer,
+                        note=args.note,
+                    )
+                except StoreError as exc:
+                    return _store_refusal(exc.code, exc.message)
+            _emit(_store_payload(
+                "review patch", status="ok", review=record,
+                note="the patch applied to the current baseline's stored canonical form and is now "
+                     "an ordinary proposal: decide and apply it under a named human, like any other "
+                     "change; `review impact` shows the diff before you do",
             ))
             return EXIT_OK
 
@@ -1310,6 +1374,30 @@ def build_parser() -> argparse.ArgumentParser:
     p_r.add_argument("--target-baseline-hash", required=True,
                      help="the baseline to go back to (`store baseline <model> --all` lists them)")
     p_r.add_argument("--review-id", required=True)
+    p_r.add_argument("--reviewer", default="agent",
+                     help="who proposes (default: agent — an agent may propose but never approve)")
+    p_r.add_argument("--note", default=None)
+    p_r.set_defaults(func=cmd_review)
+
+    p_r = review_sub.add_parser(
+        "patch-preview",
+        help="read-only: apply an object-level patch to the current baseline and show the diff",
+    )
+    p_r.add_argument("db")
+    p_r.add_argument("--model-id", required=True)
+    p_r.add_argument("--patch", required=True, help="path to a JSON array of patch operations")
+    p_r.set_defaults(func=cmd_review)
+
+    p_r = review_sub.add_parser(
+        "patch",
+        help="turn an object-level patch into an ordinary review proposal "
+             "(edits the stored current baseline, not a caller-supplied model)",
+    )
+    p_r.add_argument("db")
+    p_r.add_argument("--model-id", required=True)
+    p_r.add_argument("--patch", required=True, help="path to a JSON array of patch operations")
+    p_r.add_argument("--review-id", required=True)
+    p_r.add_argument("--expected-baseline-hash", required=True)
     p_r.add_argument("--reviewer", default="agent",
                      help="who proposes (default: agent — an agent may propose but never approve)")
     p_r.add_argument("--note", default=None)

@@ -89,6 +89,7 @@ COVERAGE = {
     "storage_value_scans": 0,
     "impact_reports": 0,
     "reverts_applied": 0,
+    "patch_proposals": 0,
 }
 
 
@@ -412,7 +413,8 @@ def verify_state_machine(tmp: Path) -> Path:
     models = ROOT / "reference" / "03_contracts" / "examples"
 
     with SqliteRepository(str(db)) as repo:
-        model_a = validate_model(json.loads((models / "M03_repeated_event.json").read_text(encoding="utf-8")))
+        raw = json.loads((models / "M03_repeated_event.json").read_text(encoding="utf-8"))
+        model_a = validate_model(raw)
         solution_a = solve_model(model_a)
         first = repo.record_run(
             run_id="A", model=model_a, solution=solution_a,
@@ -614,6 +616,46 @@ def verify_state_machine(tmp: Path) -> Path:
         if rows["A"]["stale_reason"] is not None:
             fail("state: a run back on the current baseline kept its stale reason")
         COVERAGE["reverts_applied"] += 1
+
+        # -- object-level patch: the forward twin of revert. The patch applies
+        # to the stored current baseline; the patched form must hash exactly
+        # like an equivalent full-model proposal (convergence of the two
+        # entry points), and an invalid patch is recorded, not dropped.
+        patch_ops = [
+            {"op": "set_event_probability", "event": raw["basic_events"][0]["id"],
+             "probability": "0.21"},
+        ]
+        equivalent = json.loads(json.dumps(raw))
+        equivalent["basic_events"][0]["probability"] = "0.21"
+        patch_record = repo.patch_review(
+            review_id="POP-P1", model_id=model_a.model_id,
+            expected_baseline_hash=repo.current_baseline_hash(model_a.model_id),
+            ops=patch_ops, proposed_by="agent",
+        )
+        equivalent_model = validate_model(equivalent)
+        if patch_record["state"] != "proposed":
+            fail("state: a valid patch was not recorded as proposed")
+        if patch_record["proposed_hash"] != semantic_model_hash(equivalent_model):
+            fail("state: patch and full-model proposal of the same semantics hash differently")
+        COVERAGE["patch_proposals"] += 1
+        expect_refusal(
+            "state: agent decides a patch", "APPROVAL_AUTHORITY",
+            lambda: repo.decide_review("POP-P1", approve=True, reviewer="bot"),
+        )
+        repo.decide_review("POP-P1", approve=True, reviewer="JerryKogami")
+        applied_patch, _ = repo.apply_review("POP-P1", reviewer="JerryKogami")
+        if applied_patch["applied_baseline_hash"] != semantic_model_hash(equivalent_model):
+            fail("state: applying a patch anchored something other than the patched semantics")
+
+        bad_patch = repo.patch_review(
+            review_id="POP-P2", model_id=model_a.model_id,
+            expected_baseline_hash=repo.current_baseline_hash(model_a.model_id),
+            ops=[{"op": "remove_event", "event": raw["basic_events"][0]["id"]}],
+            proposed_by="agent",
+        )
+        if bad_patch["state"] != "invalid" or bad_patch["validation_code"] != "PATCH_OP":
+            fail("state: an invalid patch was not recorded as invalid with PATCH_OP")
+        COVERAGE["patch_proposals"] += 1
 
         # the store's own integrity pass
         problems = repo.verify()
@@ -857,6 +899,8 @@ def main() -> int:
           f"(proposal diffed against the current baseline)")
     print(f"  reverts applied       : {COVERAGE['reverts_applied']} "
           f"(stale re-derived in BOTH directions)")
+    print(f"  patch proposals       : {COVERAGE['patch_proposals']} "
+          f"(one applied, one recorded invalid)")
     print(f"  refusals triggered    : "
           + ", ".join(f"{code}x{n}" for code, n in sorted(COVERAGE["refusals"].items())))
     print(f"  population problems   : {population_problems}")
@@ -873,7 +917,7 @@ def main() -> int:
         key for key in ("runs_verified", "events_compared", "importance_values_compared", "baselines_rehashed",
                         "undefined_measures_compared", "rational_text_values",
                         "runs_on_superseded_baseline", "idempotent_noops",
-                        "impact_reports", "reverts_applied")
+                        "impact_reports", "reverts_applied", "patch_proposals")
         if COVERAGE.get(key, 0) == 0
     ]
     if nonzero:

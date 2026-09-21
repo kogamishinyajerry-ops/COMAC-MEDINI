@@ -46,6 +46,16 @@ python run.py review impact  store.sqlite REV-1            # 只读：这份提�
 python run.py review decide  store.sqlite REV-1 --approve --reviewer <human>
 python run.py review apply   store.sqlite REV-1 --reviewer <human>   # 旧 run 自动标 stale
 
+# 对象级 patch：编辑指令作用于库内当前基线（无需整份模型文件）
+python run.py review patch-preview store.sqlite --model-id <model_id> --patch patch.json  # 只读预览
+python run.py review patch store.sqlite --model-id <model_id> --patch patch.json \
+       --review-id P1 --expected-baseline-hash <current> --reviewer agent
+python run.py review decide store.sqlite P1 --approve --reviewer <human>   # 之后同普通提案
+# patch.json 是操作数组，如：
+# [{"op":"set_event_probability","event":"A","probability":"0.25"},
+#  {"op":"add_event","event":{"id":"D","p":"0.05"}},
+#  {"op":"set_gate","gate":{"id":"G2","kind":"AND","inputs":["A","D"]}}]
+
 # 回退到某个旧基线（提案从基线表自建，仍需两步人类批准；无 --assume-yes）
 python run.py store  baseline store.sqlite <model_id> --all            # 列出持有过的基线
 python run.py review revert  store.sqlite --model-id <model_id> \
@@ -106,7 +116,7 @@ python run.py fmea propose-from-importance store.sqlite --run <run_id> \
 | 码 | 含义 |
 | --- | --- |
 | 0 | 成功 |
-| 2 | 模型非法（语义/解析错误，含单位/失效率参数非法、FMEA 输入/身份/来源/关联非法）；或存储/评审请求被拒（RUN_ID_CONFLICT / BASELINE_* / REVIEW_* / APPROVAL_AUTHORITY / FMEA_NOT_FOUND / FMEA_STATE / FMEA_REVISION_CONFLICT / FMEA_PLACEHOLDER / REVERT_TARGET） |
+| 2 | 模型非法（语义/解析错误，含单位/失效率参数非法、FMEA 输入/身份/来源/关联/patch 操作非法）；或存储/评审请求被拒（RUN_ID_CONFLICT / BASELINE_* / REVIEW_* / APPROVAL_AUTHORITY / FMEA_NOT_FOUND / FMEA_STATE / FMEA_REVISION_CONFLICT / FMEA_PLACEHOLDER / REVERT_TARGET） |
 | 3 | 不支持的语义（如 PAND、非恒定失效率、可修复语义）；或库由不兼容的 schema 世代写入（STORE_SCHEMA_MISMATCH） |
 | 4 | 资源上限（BDD 节点/割集路径截断） |
 | 5 | 内部错误（含 `store verify` 发现的存储不一致），如实失败，不冒充成功 |
@@ -120,13 +130,13 @@ python run.py fmea propose-from-importance store.sqlite --run <run_id> \
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install pytest    # 联网准备环境执行
-.venv/Scripts/python -m pytest tests/ -q      # 250 项，离线可跑
+.venv/Scripts/python -m pytest tests/ -q      # 290 项，离线可跑
 
 # 交叉验证不需要 pytest（纯标准库）：
 python verification/run_cross_check.py              # 210 模型（结构），离线可跑
 python verification/run_rate_cross_check.py         # 120 模型（λt→q 转换），离线可跑
 python verification/run_importance_cross_check.py   # 120 模型（重要度），离线可跑
-python verification/run_store_verification.py       # 存储（重推导 + 突变测试 + 往返 + revert/impact 契约），离线可跑
+python verification/run_store_verification.py       # 存储（重推导 + 突变测试 + 往返 + revert/impact/patch 契约），离线可跑
 python verification/run_fmea_verification.py        # FMEA（原始列独立重哈希 + 状态机 + 突变测试），离线可跑
 ```
 

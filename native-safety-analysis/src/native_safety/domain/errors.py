@@ -47,3 +47,6 @@ FMEA_INPUTS = "FMEA_INPUTS"        # malformed row structure or empty required t
 FMEA_ID = "FMEA_ID"                # bad stable identifier (row/component/function/requirement)
 FMEA_SOURCE = "FMEA_SOURCE"        # unknown provenance, or an inference row without its note
 FMEA_LINK = "FMEA_LINK"            # a linked event id is unknown / not in the referenced baseline
+# Object-level patch language (model-patch-v1). A rejected patch is invalid
+# input against the CURRENT baseline's canonical form.
+PATCH_OP = "PATCH_OP"

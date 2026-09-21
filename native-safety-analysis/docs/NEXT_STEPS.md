@@ -12,7 +12,7 @@
   - stale 为**派生量**：`stale ⟺ baseline_hash ≠ 模型当前基线`；旧 run 载荷完整保留，旧证据仍可读
   - 精确入库（§231）：概率/重要度全为精确十进制或精确 `n/d` 文本；库中无 REAL/FLOAT 列，且用 `typeof()` 逐值验证
   - 变更闭环：`review propose → decide（需具名人类）→ apply`；Agent 只能提案（§181），批准绑定基线与内容（过期批准 / 被篡改提案一律拒绝）
-  - CLI：`analyze --db`、`store {init,status,runs,show,baseline,adopt-baseline,important,verify,export}`、`review {propose,impact,revert,list,show,decide,apply}`
+  - CLI：`analyze --db`、`store {init,status,runs,show,baseline,adopt-baseline,important,verify,export}`、`review {propose,patch,patch-preview,impact,revert,list,show,decide,apply}`
   - 独立验证：`verification/run_store_verification.py`（raw sqlite3 读回 + 2ⁿ oracle 重推导 1362 项精确相等；53 份基线独立重哈希；**9/9 突变被检出**；dump→restore 往返一致）
   - 过程中被抓出的真实缺陷：`record_run` 的基线与 run 写入原先分属两个事务（拒绝后留下孤儿基线）；`store.verify` 删掉一行重要度时漏报（自洽 ≠ 完整）
 
@@ -75,6 +75,15 @@
   - 独立验证：population 加一次完整 review 循环 + 一次 applied revert；状态机加 impact/revert 契约复跑（`REVERT_TARGET` 计入真空度闸门）；**突变增至 10 种**（新增"applied review 的锚定基线被改指"→ 被检出）
   - 认证层（身份系统替代 `--reviewer` 字符串）：**仍未做**，待外部裁决（见"需要外部裁决"表）
 
+- **对象级 patch 语言（B07 后半：`model-patch-v1`）** ✅
+  - 领域层 `domain/patch.py`：`apply_patch()` / `patch_preview()` 纯函数；八种操作按序应用（`set_event_probability`/`add_event`/`remove_event`/`set_gate`/`add_gate`/`remove_gate`/`set_top_event`/`set_condition`）
+  - **校验在规范形式层**（必须如此）：canonical 的 `p` 可为精确 `n/d`（`1/3`），宽于模型输入词法——重建文件无法合法表达；实质检查与 `validate_model` 等价（引用/全图无环含不可达部分/K_OF_N/双向语义守卫）
+  - **概率走共享渲染器**：`"0.250"` ≡ `"0.25"`（同哈希）；`"1/3"` 精确保留
+  - **patch 与等价全模型提案产出相同 `proposed_hash`**（收敛性，独立验证锁定）——两条入口不可能各自漂移
+  - **守卫**：rate 事件的 p 不可直设（λ·t 派生）；被引用对象不可删；跨操作构造的环与不可达环被终检拒绝；非法 patch 记 `invalid`（`PATCH_OP`）
+  - `review patch` / `review patch-preview`；之后 decide/apply/revert/verify 与任何提案**完全同构**
+  - 样例 `examples/P01_patch_derate_and_add.json`；v1 边界：`add_event` 仅普通概率、无移动/重命名、编辑 rate 记录未实现
+
 ## 立即可做的下一步（按优先级）
 
 1. **SCRAM 第三方差分评估**（前置阻塞：GPL-3.0 合规裁决）
@@ -82,9 +91,9 @@
    - 若可行：固定 commit、独立进程调用、对照协议（同模型双向转换损失报告）
    - 若不可行：记录裁决，另选差分策略（如自建第二 BDD 变体 + 变量序扰动）
 
-2. **对象级 patch 语言（B07 后半）**
-   - 当前提案仍是整份模型（revert 已能从库内自建提案，但**前向**修改仍需完整模型文件）
-   - 候选形态：对规范形式的编辑指令（增删改事件/门/重接输入），apply 时在库内展开为完整规范形式再走既有闭环——复用 impact diff 做 patch 的影响预览
+2. **rate 编辑的 patch 语义**（`model-patch-v2` 候选）
+   - `set_event_rate` 操作：改 λ/t/单位后**重跑转换闸门**（恒定率/单位/精度）并重派生 p
+   - 需要自己的语义规格与转换验证（复用 `run_rate_cross_check` 的 oracle 思路）
    - 认证层接入，用身份系统替代 `--reviewer` 字符串 + 保留标识判断（见 VERIFICATION.md 待裁决项）
 
 3. **重要度增量重算（B03 收尾之二，先测再优化）**
@@ -92,6 +101,7 @@
    - ~~按度量排序的"关键事件 Top-N"汇总~~ ✅ `store important --by … --top N`
    - ~~高 FV / 高 RAW 事件驱动 FMEA 关注项~~ ✅ `fmea propose-from-importance`
    - ~~影响范围分析 + 一等公民 revert~~ ✅ `review impact` / `review revert`
+   - ~~对象级 patch 语言~~ ✅ `review patch` / `review patch-preview`
 
 ## 需要外部裁决的事项（不擅自决定）
 

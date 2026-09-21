@@ -1,0 +1,5 @@
+[
+  {"op": "set_event_probability", "event": "A", "probability": "0.25"},
+  {"op": "add_event", "event": {"id": "D", "p": "0.05"}},
+  {"op": "set_gate", "gate": {"id": "G2", "kind": "AND", "inputs": ["A", "D"]}}
+]

@@ -178,6 +178,10 @@ Q = qᵢ·q+ᵢ + (1 − qᵢ)·q−ᵢ          （多重线性恒等式，无�
 
 ```
 review propose   --expected-baseline-hash H   （校验提案；不改变任何基线）
+review patch     --patch <ops.json> --model-id M --review-id R --expected-baseline-hash H
+                                              （对象级编辑指令，作用于库内当前基线的规范形式；产出普通提案）
+review patch-preview --patch <ops.json> --model-id M
+                                              （只读：预览 patch 的 diff，不记录任何东西）
 review impact    <review_id>                  （只读：提案 ↔ 当前基线的结构化 diff，两侧均取自库内行）
 review revert    --model-id M --target-baseline-hash H --review-id R
                                               （从基线表自建一份"回到 H"的提案；不改变任何基线）
@@ -216,6 +220,33 @@ review apply                                  （需要具名人类；把已批�
 - **基线行永不改写**（§203）：revert 只把 `models.current_baseline_hash` 指回旧行；两条基线行逐字节不变。
 - **stale 双向重派生**：回到当前基线的旧 run 清除 stale 与 stale_reason；落在后面的新 run 置 stale。旧载荷始终完整保留。
 - 再次往返（revert 的 revert）需要**全新提案与全新期望哈希**——乐观并发对回退不豁免。
+
+### 对象级 patch 语言（`model-patch-v1`）
+
+前向修改的编辑指令形态：作者提交一个 **JSON 操作数组**，而非整份模型文件。patch 作用于**库内当前基线的规范形式**，产物是一份普通提案：
+
+```json
+[
+  {"op": "set_event_probability", "event": "A", "probability": "0.25"},
+  {"op": "add_event", "event": {"id": "D", "p": "0.05"}},
+  {"op": "set_gate", "gate": {"id": "G2", "kind": "AND", "inputs": ["A", "D"]}}
+]
+```
+
+八种操作：`set_event_probability` / `add_event` / `remove_event` / `set_gate` / `add_gate` / `remove_gate` / `set_top_event` / `set_condition`。语义要点：
+
+- **按序应用**：每个操作看到前一个的结果；最终形式作为整体再校验（引用可解析、全图无环——含不可达部分、K_OF_N 边界、双向语义守卫）。
+- **校验发生在规范形式层**（这是必须的）：canonical 把概率渲染为精确十进制或精确 `n/d` 有理文本（如 `1/3`），**宽于**模型输入词法——重建模型文件会无法合法表达 `1/3`。因此 patch 结果在其所在层独立校验，实质检查与 `validate_model` 相同。
+- **概率经共享渲染器**：`"0.250"` 与 `"0.25"` 产出**相同**规范形式（同一哈希）；`"1/3"` 被接受并精确保留。
+- **rate 事件的 p 不可直接设**：它由 λ·t 派生，`set_event_probability` 对带 `rate` 的事件 → `PATCH_OP` 拒绝（改 rate 是另一个未实现的操作——它需要自己的语义规格）。
+- **删除被引用的对象被拒**：事件/门仍被门输入或顶事件引用时不可 `remove`（先改接或先删引用方）；自环与跨操作构造的环被终检拒绝。
+- **移除最后一个 rate 事件会触发双向语义守卫**：模型声明 `fixed_mission_probability_from_constant_rate` 却不再含 rate 事件 → 拒绝（反向同理）。
+- **patch 与整份模型提案收敛**：对同一语义变更，两条入口（patch vs 全模型文件）产出**相同的 `proposed_hash`**——这是独立验证的一项契约（防止两条路径各自漂移出不同的规范形式）。
+- **非法 patch 被记录为 `invalid`**（带 `PATCH_OP` 码），不可批准，留审计痕迹——与其他提案一致。
+- `review patch-preview` 只读预览 diff（不记录）；`review impact` 对 patch 提案同样可用。
+- patch 之后的一切（decide/apply/守卫/revert/verify）**与其他提案完全同构**——没有 patch 专用通道。
+
+**v1 刻意排除**：`add_event` 只接受普通概率事件（添加 rate 事件需完整 rate 闸门，待真实需要再做）；无"移动/重命名"操作（改名=删+增，语义上已是不同的事件）；patch 文件中无注释键（JSON 数组就是操作本身）。
 
 ## FMEA 基础表与追溯语义
 
@@ -317,7 +348,7 @@ fmea propose-from-importance <db> --run <run_id> [--by <度量>] [--top N] [--mi
 | --- | --- |
 | UNSUPPORTED_GATE, RATE_UNSUPPORTED | 3（不支持） |
 | STORE_SCHEMA_MISMATCH（库由不兼容的 schema 世代写入） | 3（不支持） |
-| VERSION, ASSUMPTIONS, ID, DUPLICATE_ID, INPUTS, SOURCE, PROBABILITY, RATE_VALUE, RATE_UNITS, K_OF_N, UNKNOWN_REFERENCE, CYCLE, TOP_EVENT, SIZE_LIMIT, PARSE, IO, FMEA_INPUTS, FMEA_ID, FMEA_SOURCE, FMEA_LINK | 2（非法输入） |
+| VERSION, ASSUMPTIONS, ID, DUPLICATE_ID, INPUTS, SOURCE, PROBABILITY, RATE_VALUE, RATE_UNITS, K_OF_N, UNKNOWN_REFERENCE, CYCLE, TOP_EVENT, SIZE_LIMIT, PARSE, IO, FMEA_INPUTS, FMEA_ID, FMEA_SOURCE, FMEA_LINK, PATCH_OP | 2（非法输入） |
 | RUN_ID_CONFLICT, BASELINE_NOT_CURRENT, BASELINE_CONFLICT, REVIEW_NOT_FOUND, RUN_NOT_FOUND, MODEL_NOT_FOUND, REVIEW_STATE, APPROVAL_AUTHORITY, STORE_BAD_ARGUMENT, STORE_IO, FMEA_NOT_FOUND, FMEA_STATE, FMEA_REVISION_CONFLICT, FMEA_PLACEHOLDER, REVERT_TARGET | 2（请求被拒） |
 | INTEGRITY（`store verify` 发现库内不一致） | 5 |
 | 节点/路径上限触发 | 4（资源受限，非错误，结果标 resource_limited） |
@@ -347,7 +378,9 @@ fmea propose-from-importance <db> --run <run_id> [--by <度量>] [--top N] [--mi
 
 动态门、顺序失效、修复过程、潜伏/检查间隔、未建模相关性/共因、NOT/非相干逻辑、任意概率分布表达式、软件失效随机化、非恒定失效率（Weibull/老化）。以上任何一项出现在输入中都会导致明确拒绝，不会退化为 AND/OR。
 
-FMEA 侧同样明确排除：FMECA 的 severity/occurrence/detection/RPN、FMEDA、诊断覆盖率与失效率分配、组件/功能/要求的独立对象表、**前向修改的对象级 patch 语言**（revert 与影响分析已实现；前向提案仍为整份模型）。以上均为后续阶段项，本版本不接受、不近似。
+FMEA 侧同样明确排除：FMECA 的 severity/occurrence/detection/RPN、FMEDA、诊断覆盖率与失效率分配、组件/功能/要求的独立对象表。以上均为后续阶段项，本版本不接受、不近似。
+
+patch 侧的 v1 边界（详见"对象级 patch 语言"一节）：`add_event` 不接受 rate 事件（需完整 rate 闸门，待真实需要）；无移动/重命名操作；**编辑 rate 记录本身**（λ/t/单位）未实现——那需要自己的语义规格与转换验证，不是 `set_event_probability` 的变体。
 
 同样排除 **"引擎替人撰写 FMEA 内容"**：重要度只能指出**哪个事件值得关注**（并给出精确理由），不能产出失效模式、原因或影响。任何"自动填出失败模式"的行为都属于编造工程结论，本版本在数据结构层面就不提供该能力——关注项的四个描述字段只能以标记占位存在，且带标记的行**永远无法**进入正式表。
 

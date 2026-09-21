@@ -21,6 +21,7 @@
 | **验证自身有效性（突变测试）** | ✅ 已执行 | 10 种篡改（改数值/删行/改基线/翻 stale/加浮点列/存 REAL/**改指 applied review 的锚定基线**）**全部被检出** |
 | **影响范围分析（impact）** | ✅ 已执行 | 提案↔当前基线的结构化 diff **两侧都从库内行读出**（不依赖模型文件）；词法噪音在 diff 前消失；门输入仅重排被标 `order_only` |
 | **一等公民 revert** | ✅ 已执行 | 提案**从基线表自建**（目标必须是本库持有过的基线且仍能自重哈希）；仍走两步人类批准；基线行逐字节不变；revert 后 stale **双向**翻转且 verify 干净 |
+| **对象级 patch 语言** | ✅ 已执行 | 40 项专项测试 + 状态机契约复跑：八种操作按序应用、纯函数（输入不变）、**与等价全模型提案产出相同哈希**（收敛性）、rate 事件 p 不可直设、被引用对象不可删、跨操作环被拒、非法 patch 记 `invalid`、`1/3` 精确保留 |
 | **FMEA 行独立重哈希** | ✅ 已执行 | verification/run_fmea_verification.py：15 当前行 + 2 被取代行由**原始列**独立重建 `fmea-canonical-v1` 规范形式，须等于入库 `canonical_json` 且重哈希等于 `content_hash` |
 | **FMEA 来源与确认** | ✅ 已执行 | 5 条推断行逐条验证 `inference_note` 非空；批准人不得是机器标识；每行必须可回溯到一份同内容哈希的 `applied` 候选 |
 | **FMEA 修订不可变** | ✅ 已执行 | 2 条被取代行的内容字节不变，仅 `superseded`/`superseded_by_version` 变化；后继版本必存在且更大；同名至多一个当前版本 |
@@ -38,7 +39,7 @@
 
 ```text
 $ python -m pytest tests/ -q                     # venv Python 3.13.12 + pytest 9.1.1
-250 passed in ~51s    （含 test_fmea.py 85 项 + test_change_mgmt.py 24 项）
+290 passed in ~57s    （含 test_fmea.py 85 项 + test_change_mgmt.py 24 项 + test_patch.py 40 项）
 
 $ python verification/run_cross_check.py         # 结构：标准库 Python 3.13.12
 cross-check: 210/210 passed
@@ -79,6 +80,7 @@ store verification
   idempotent no-ops     : 1
   impact reports        : 1 (proposal diffed against the current baseline)
   reverts applied       : 1 (stale re-derived in BOTH directions)
+  patch proposals       : 2 (one applied, one recorded invalid)
   refusals triggered    : APPROVAL_AUTHORITYx2, BASELINE_CONFLICTx4, BASELINE_NOT_CURRENTx1,
                           REVERT_TARGETx2, REVIEW_NOT_FOUNDx2, REVIEW_STATEx3, RUN_ID_CONFLICTx1,
                           STORE_SCHEMA_MISMATCHx1
@@ -117,6 +119,14 @@ $ python run.py review decide  … --approve --reviewer agent   → APPROVAL_AUT
 $ python run.py review apply   … --reviewer JerryKogami       → applied；旧 run 标 stale
 
 $ python run.py review impact  <db> REV-1                 → 结构化 diff（两侧均取自库内行）
+$ python run.py review patch-preview <db> --model-id M --patch p.json
+                                                              → 只读预览 diff, exit 0
+$ python run.py review patch  <db> --model-id M --patch p.json --review-id P1 \
+       --expected-baseline-hash <current>
+                                                              → 普通提案（patch 作用于库内基线）, exit 0
+$ python run.py review patch  <db> … --patch <非法操作>     → 记 invalid + PATCH_OP, exit 0（留审计）
+$ python run.py review patch  <db> … --expected-baseline-hash <过期>
+                                                              → BASELINE_CONFLICT;  exit 2
 $ python run.py review revert  <db> --model-id M --target-baseline-hash H --review-id RV-1
                                                               → 从基线表自建提案；基线不动
 $ python run.py review revert  <db> … --target-baseline-hash <当前基线>
@@ -418,6 +428,20 @@ rate 转换另有独立不变量（tests/test_rate_model.py）：λ 单调、t �
 43. **stale 双向翻转**：revert 后，回到当前基线的旧 run `stale=0` 且 `stale_reason=NULL`，落下的新 run `stale=1`——旧实现"只升不降"会让旧 run 永远卡 stale（本轮修复的真实缺陷）
 44. 被拒的 revert（`--reject`）不动基线；`verify()` 全程干净；dump→restore 往返后 revert 仍可决定与应用
 
+**对象级 patch 语言不变量（tests/test_patch.py，40 项）：**
+
+45. `apply_patch` 是**纯函数**：输入规范形式逐字节不变（深拷贝后编辑）
+46. 操作**按序应用**且看到彼此结果（先 `add_event D` 再把 G2 改接到 D）
+47. 概率经**共享渲染器**归一化：`"0.25"` 与 `"0.250"` 产出相同规范形式（相同哈希）；`"1/3"` 被接受并精确保留，且可作为后续 patch 的基数
+48. **22 种非法操作全部以 `PATCH_OP` 拒绝**：未知操作/未知对象/越界概率/非法数字/重复 ID/被引用删除/空 inputs/缺 k/k 越界/K_OF_N 重复引用/AND 带 k/顶事件未定义/空白条件/自环…
+49. **跨两个操作构造的环**被终检拒绝（加 GX→GB 再把 GB 改接 GX）
+50. **不可达子图中的环同样被拒**（全图必须是 DAG，与模型校验同口径）
+51. **rate 事件的 p 不可直设**（由 λ·t 派生；改 rate 是未实现的独立操作）
+52. **移除最后一个 rate 事件触发双向语义守卫**（声明 rate 语义却无 rate 事件 → 拒绝）
+53. **patch 与等价全模型提案产出相同 `proposed_hash`**（两条入口收敛；独立验证脚本同样锁定）
+54. 非法 patch **被记录为 `invalid`**（`PATCH_OP`）且不可批准；过期期望基线 → `BASELINE_CONFLICT`
+55. patch 提案可 `review impact`；**apply 后可用 revert 撤销**；全程 `verify()` 干净
+
 ## 独立运行验证（无 Medini、无 A 线、无 LLM、无网络）
 
 - 全部代码仅用 Python 标准库（json/re/fractions/hashlib/dataclasses/argparse/pathlib/decimal/**sqlite3**）
@@ -439,4 +463,4 @@ rate 转换另有独立不变量（tests/test_rate_model.py）：λ 单调、t �
 - **FMEA 表口径确认**：本版本刻意**不含**严重度/发生度/探测度/RPN，也不产生 FMECA/FMEDA 结论。若工程上需要风险排序，应作为**新增字段与新增语义**并单独验证，而非就地扩展本表
 - **推断行的确认流程**：`source='inference'` 的行必须写 `inference_note` 且须人类批准方可入表，但"谁来确认、确认到什么程度算充分"需安全专家给出规程
 - **悬空关联的处置**：基线移动后失联的关联只报告与计数、不判为损坏。是否需要"重新挂接"或"显式断开"的操作，待确认
-- **变更提案的粒度**：影响范围分析（`review impact`）与 revert（`review revert`，从库内自建提案）已落地并验证；**前向**修改的提案仍是一份完整模型——对象级 patch 语言是否必要、什么形态，仍待裁决
+- **变更提案的粒度**：影响范围分析（`review impact`）、revert（从库内自建提案）、**对象级 patch 语言**（`review patch`，八种操作、收敛性与全模型提案一致）均已落地并验证；尚待裁决的是**编辑 rate 记录**（λ/t/单位）的 patch 语义与是否需要移动/重命名操作
