@@ -279,6 +279,135 @@ def test_a_rate_edit_converges_with_a_full_rate_model_change():
     assert hash_canonical_form(patched) == hash_canonical_form(via_model)
 
 
+# --------------------------------------------------------------------------
+# add_event with a rate spec + set_probability_semantics
+# --------------------------------------------------------------------------
+
+
+def _plain_form():
+    model = load_model(EXAMPLES / "M03_repeated_event.json")
+    return canonical_model_form(model)
+
+
+_RATE_SPEC = {
+    "model": "constant_failure_rate", "lambda": "2e-6", "lambda_unit": "1/h",
+    "mission_time": "500", "mission_time_unit": "h",
+    "repairable": False, "source": "new sensor channel",
+}
+
+
+def test_add_event_accepts_a_rate_spec_through_the_gate():
+    patched = apply_patch(_plain_form(), [
+        {"op": "add_event", "event": {"id": "D", "rate": _RATE_SPEC}},
+        {"op": "set_probability_semantics",
+         "probability_semantics": "fixed_mission_probability_from_constant_rate"},
+    ])
+    assert patched["schema_version"] == "0.2.0"  # auto-upgraded with the first rate event
+    event = [e for e in patched["basic_events"] if e["id"] == "D"][0]
+    assert event["rate"]["lambda_t"] == "0.001"  # exact 2e-6 * 500
+    assert event["p"].startswith("0.0009995001666250083319")  # 1-exp(-0.001)
+    assert event["rate"]["precision_digits"] == 40  # model default
+
+
+def test_add_event_rate_oracle_and_convergence():
+    sys.path.insert(0, str(ROOT / "verification"))
+    from run_rate_cross_check import oracle_q
+
+    ops = [
+        {"op": "add_event", "event": {"id": "D", "rate": _RATE_SPEC}},
+        {"op": "set_probability_semantics",
+         "probability_semantics": "fixed_mission_probability_from_constant_rate"},
+    ]
+    patched = apply_patch(_plain_form(), ops)
+    event = [e for e in patched["basic_events"] if e["id"] == "D"][0]
+    reference = oracle_q(Fraction("2e-6"), Fraction("500"))
+    assert abs(Fraction(event["p"]) - reference) < Fraction(1, 10**30)
+
+    raw = json.loads((EXAMPLES / "M03_repeated_event.json").read_text(encoding="utf-8"))
+    raw["schema_version"] = "0.2.0"
+    raw["assumptions"]["probability_semantics"] = "fixed_mission_probability_from_constant_rate"
+    raw["basic_events"].append({"id": "D", "label": "D", "source": "new sensor channel",
+                                "failure_rate": _RATE_SPEC})
+    via_model = canonical_model_form(load_model_from_dict(raw))
+    assert hash_canonical_form(patched) == hash_canonical_form(via_model)
+
+
+def test_add_event_rate_refuses_when_the_semantics_is_not_flipped():
+    with pytest.raises(ModelError) as caught:
+        apply_patch(_plain_form(), [{"op": "add_event", "event": {"id": "D", "rate": _RATE_SPEC}}])
+    assert caught.value.code == err.PATCH_OP
+    assert "fixed_mission_probability_from_constant_rate" in caught.value.message
+
+
+def test_add_event_rate_keeps_the_underlying_error_codes():
+    for bad, code in [
+        (dict(_RATE_SPEC, lambda_unit="1/s"), "RATE_UNITS"),
+        (dict(_RATE_SPEC, repairable=True), "RATE_UNSUPPORTED"),
+        (dict(_RATE_SPEC, mission_time="-5"), "RATE_VALUE"),
+    ]:
+        with pytest.raises(ModelError) as caught:
+            apply_patch(_plain_form(), [{"op": "add_event", "event": {"id": "D", "rate": bad}}])
+        assert caught.value.code == code
+
+
+def test_add_event_rate_in_a_mixed_model_inherits_sibling_precision():
+    form = canonical_model_form(load_model(ROOT / "examples" / "R02_rate_mixed.json"))
+    patched = apply_patch(form, [
+        {"op": "add_event", "event": {"id": "E", "rate": dict(_RATE_SPEC, source="extra")}},
+    ])
+    event = [e for e in patched["basic_events"] if e["id"] == "E"][0]
+    assert event["rate"]["precision_digits"] == 40  # from the existing rate sibling
+    assert patched["schema_version"] == "0.2.0"  # no change needed
+
+
+def test_schema_never_downgrades_by_removing_the_last_rate_event():
+    """Removing the last rate event leaves 0.2.0 + rate semantics in place;
+    the final check refuses — a downgrade narrows declared semantics and
+    must be an explicit decision, not an edit side effect."""
+    form = canonical_model_form(load_model(ROOT / "examples" / "R01_rate_and.json"))
+    plain = {"id": "PLAIN", "p": "0.1"}
+    ops = [
+        {"op": "add_event", "event": plain},
+        {"op": "set_gate", "gate": {"id": "TOP", "kind": "AND", "inputs": ["PLAIN"]}},
+    ] + [{"op": "remove_event", "event": e["id"]} for e in form["basic_events"] if "rate" in e]
+    with pytest.raises(ModelError) as caught:
+        apply_patch(form, ops)
+    assert caught.value.code == err.PATCH_OP
+    assert "fixed_mission_probability_from_constant_rate" in caught.value.message
+
+
+def test_set_probability_semantics_is_an_explicit_declaration():
+    # a lone flip on a plain model is refused by the two-way guard
+    with pytest.raises(ModelError) as caught:
+        apply_patch(_plain_form(), [
+            {"op": "set_probability_semantics",
+             "probability_semantics": "fixed_mission_probability_from_constant_rate"},
+        ])
+    assert caught.value.code == err.PATCH_OP
+    # unknown vocabulary is rejected
+    with pytest.raises(ModelError) as caught:
+        apply_patch(_plain_form(), [
+            {"op": "set_probability_semantics", "probability_semantics": "weibull"},
+        ])
+    assert caught.value.code == err.PATCH_OP
+    # flipping BACK after removing rate events is equally refused
+    form = _rate_form()
+    ops = [
+        {"op": "add_event", "event": {"id": "PLAIN", "p": "0.1"}},
+        {"op": "set_gate", "gate": {"id": "TOP", "kind": "AND", "inputs": ["PLAIN"]}},
+        {"op": "remove_event", "event": "P1"},
+        {"op": "remove_event", "event": "V1"},
+    ]
+    with pytest.raises(ModelError) as caught:
+        apply_patch(form, ops)
+    assert caught.value.code == err.PATCH_OP
+
+
+def test_add_event_still_accepts_plain_probabilities(form):
+    patched = apply_patch(form, [{"op": "add_event", "event": {"id": "Z", "p": "1/9"}}])
+    assert [e for e in patched["basic_events"] if e["id"] == "Z"][0]["p"] == "1/9"
+
+
 def load_model_from_dict(data):
     from native_safety.domain.validation import validate_model
     return validate_model(data)

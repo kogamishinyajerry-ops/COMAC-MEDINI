@@ -21,7 +21,7 @@
 | **验证自身有效性（突变测试）** | ✅ 已执行 | 10 种篡改（改数值/删行/改基线/翻 stale/加浮点列/存 REAL/**改指 applied review 的锚定基线**）**全部被检出** |
 | **影响范围分析（impact）** | ✅ 已执行 | 提案↔当前基线的结构化 diff **两侧都从库内行读出**（不依赖模型文件）；词法噪音在 diff 前消失；门输入仅重排被标 `order_only` |
 | **一等公民 revert** | ✅ 已执行 | 提案**从基线表自建**（目标必须是本库持有过的基线且仍能自重哈希）；仍走两步人类批准；基线行逐字节不变；revert 后 stale **双向**翻转且 verify 干净 |
-| **对象级 patch 语言** | ✅ 已执行 | 47 项专项测试 + 状态机契约复跑：九种操作按序应用、纯函数（输入不变）、**与等价全模型提案产出相同哈希**（收敛性，含 rate 编辑）、rate 事件 p 不可直设、**`set_event_rate` 重跑完整转换闸门（错误码保留 RATE_VALUE/RATE_UNITS/RATE_UNSUPPORTED/SOURCE）且 q 对照独立有理级数 oracle（容差 1e-30）**、被引用对象不可删、跨操作环被拒、非法 patch 记 `invalid`、`1/3` 精确保留 |
+| **对象级 patch 语言** | ✅ 已执行 | 55 项专项测试 + 状态机契约复跑：九种操作按序应用、纯函数（输入不变）、**与等价全模型提案产出相同哈希**（收敛性，含 rate 编辑）、rate 事件 p 不可直设、**`set_event_rate` 重跑完整转换闸门（错误码保留 RATE_VALUE/RATE_UNITS/RATE_UNSUPPORTED/SOURCE）且 q 对照独立有理级数 oracle（容差 1e-30）**、被引用对象不可删、跨操作环被拒、非法 patch 记 `invalid`、`1/3` 精确保留 |
 | **FMEA 行独立重哈希** | ✅ 已执行 | verification/run_fmea_verification.py：15 当前行 + 2 被取代行由**原始列**独立重建 `fmea-canonical-v1` 规范形式，须等于入库 `canonical_json` 且重哈希等于 `content_hash` |
 | **FMEA 来源与确认** | ✅ 已执行 | 5 条推断行逐条验证 `inference_note` 非空；批准人不得是机器标识；每行必须可回溯到一份同内容哈希的 `applied` 候选 |
 | **FMEA 修订不可变** | ✅ 已执行 | 2 条被取代行的内容字节不变，仅 `superseded`/`superseded_by_version` 变化；后继版本必存在且更大；同名至多一个当前版本 |
@@ -39,7 +39,7 @@
 
 ```text
 $ python -m pytest tests/ -q                     # venv Python 3.13.12 + pytest 9.1.1
-297 passed in ~58s    （含 test_fmea.py 85 项 + test_change_mgmt.py 24 项 + test_patch.py 47 项）
+305 passed in ~62s    （含 test_fmea.py 85 项 + test_change_mgmt.py 24 项 + test_patch.py 55 项）
 
 $ python verification/run_cross_check.py         # 结构：标准库 Python 3.13.12
 cross-check: 210/210 passed
@@ -80,7 +80,7 @@ store verification
   idempotent no-ops     : 1
   impact reports        : 1 (proposal diffed against the current baseline)
   reverts applied       : 1 (stale re-derived in BOTH directions)
-  patch proposals       : 3 (incl. 1 rate edit[s] checked against the oracle)
+  patch proposals       : 5 (incl. 1 rate edit[s], 1 rate add[s] — all oracle-checked)
   refusals triggered    : APPROVAL_AUTHORITYx2, BASELINE_CONFLICTx4, BASELINE_NOT_CURRENTx1,
                           REVERT_TARGETx2, REVIEW_NOT_FOUNDx2, REVIEW_STATEx3, RUN_ID_CONFLICTx1,
                           STORE_SCHEMA_MISMATCHx1
@@ -428,7 +428,7 @@ rate 转换另有独立不变量（tests/test_rate_model.py）：λ 单调、t �
 43. **stale 双向翻转**：revert 后，回到当前基线的旧 run `stale=0` 且 `stale_reason=NULL`，落下的新 run `stale=1`——旧实现"只升不降"会让旧 run 永远卡 stale（本轮修复的真实缺陷）
 44. 被拒的 revert（`--reject`）不动基线；`verify()` 全程干净；dump→restore 往返后 revert 仍可决定与应用
 
-**对象级 patch 语言不变量（tests/test_patch.py，47 项）：**
+**对象级 patch 语言不变量（tests/test_patch.py，55 项）：**
 
 45. `apply_patch` 是**纯函数**：输入规范形式逐字节不变（深拷贝后编辑）
 46. 操作**按序应用**且看到彼此结果（先 `add_event D` 再把 G2 改接到 D）
@@ -449,6 +449,15 @@ rate 转换另有独立不变量（tests/test_rate_model.py）：λ 单调、t �
 58. 精度**继承事件已记录的 `precision_digits`**（patch 不提供改精度入口——那是模型级决定）
 59. 普通（非 rate）事件拒绝 `set_event_rate`；未知事件拒绝；**收敛性扩展到 rate 编辑**：patch 改 λ/t 与模型级改 λ/t 产出**相同哈希**（存储验证脚本独立锁定）
 60. 同一 rate 编辑**幂等**：连续应用两次得到相同规范形式（同哈希）；rate 编辑在 diff 中可见（fingerprint 含 rate 记录）
+
+**rate 事件新增与语义声明不变量：**
+
+61. `add_event(rate)` 走与 `set_event_rate` **同一转换闸门**：q 对照独立 oracle（1e-30）；错误码保留底层分类（`RATE_UNITS`/`RATE_UNSUPPORTED`/`RATE_VALUE`）
+62. **收敛性扩展到 rate 新增**：patch 加 rate 事件（+显式语义声明）与等价的混合模型文件产出**相同哈希**（测试与存储验证双锁定）
+63. 纯概率模型加第一个 rate 事件 → **schema 自动 0.1.0→0.2.0**；混合模型加 rate 事件 → schema 不变
+64. **语义声明不被副作用翻转**：`set_probability_semantics` 是显式操作（与 `set_condition` 同级）；带 rate 事件而不声明、声明而不带，双向守卫都拒绝
+65. **schema 只升不降**：删光 rate 事件后 0.2.0 + rate 语义保持，终检拒绝（降级是语义收窄的显式决定）
+66. 新增 rate 事件精度取模型口径：有 rate 兄弟则沿用其记录精度，否则域默认 40 位
 
 ## 独立运行验证（无 Medini、无 A 线、无 LLM、无网络）
 
@@ -471,4 +480,4 @@ rate 转换另有独立不变量（tests/test_rate_model.py）：λ 单调、t �
 - **FMEA 表口径确认**：本版本刻意**不含**严重度/发生度/探测度/RPN，也不产生 FMECA/FMEDA 结论。若工程上需要风险排序，应作为**新增字段与新增语义**并单独验证，而非就地扩展本表
 - **推断行的确认流程**：`source='inference'` 的行必须写 `inference_note` 且须人类批准方可入表，但"谁来确认、确认到什么程度算充分"需安全专家给出规程
 - **悬空关联的处置**：基线移动后失联的关联只报告与计数、不判为损坏。是否需要"重新挂接"或"显式断开"的操作，待确认
-- **变更提案的粒度**：影响范围分析（`review impact`）、revert（从库内自建提案）、**对象级 patch 语言**（`review patch`，九种操作含 `set_event_rate`、收敛性与全模型提案一致）均已落地并验证；尚待裁决的是是否需要**新增 rate 事件的 patch 操作**与移动/重命名操作
+- **变更提案的粒度**：影响范围分析（`review impact`）、revert（从库内自建提案）、**对象级 patch 语言**（`review patch`，十种操作含 `set_event_rate` 与 `add_event(rate)`、收敛性与全模型提案一致）均已落地并验证；尚待裁决的是是否需要移动/重命名操作

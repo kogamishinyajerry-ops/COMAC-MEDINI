@@ -20,9 +20,14 @@ Deliberate v1 boundaries:
   * operations apply IN ORDER; each sees the previous one's result;
   * `set_event_rate` edits an EXISTING rate event's record through the full
     conversion gate (parse -> q -> provenance); `set_event_probability`
-    refuses rate events (their p is derived), and adding a NEW rate event is
-    a separate, unimplemented operation — it must carry the whole rate gate;
-  * `add_event` adds a plain-probability event only;
+    refuses rate events (their p is derived). `add_event` accepts EITHER a
+    plain `p` or a full `rate` spec — a new rate event goes through the same
+    gate, and the FIRST rate event entering a plain 0.1.0 model upgrades the
+    schema version to 0.2.0 so the two-way semantics guard passes;
+  * the schema version never DOWNGRADES: removing the last rate event from a
+    0.2.0 model leaves the version (and its rate semantics declaration) in
+    place, and the final check then refuses the form — a downgrade narrows
+    declared semantics and must be an explicit decision, not a side effect;
   * nothing here decides acceptability — approval stays with a named human.
 """
 from __future__ import annotations
@@ -53,6 +58,7 @@ OPERATIONS = (
     "remove_gate",
     "set_top_event",
     "set_condition",
+    "set_probability_semantics",
 )
 
 _ASSUMPTION_KEYS = ("basic_events_independent", "probability_semantics", "condition")
@@ -170,25 +176,61 @@ def _op_add_event(form: dict, op: dict, tag: str) -> None:
         raise ModelError(errors.PATCH_OP, f"{tag}: event must be an object")
     event_id = spec.get("id")
     _require_id(event_id, f"{tag}.event.id")
-    text = spec.get("p")
-    if not isinstance(text, str) or not text.strip():
-        raise ModelError(errors.PATCH_OP, f"{tag}: event.p must be a non-empty decimal string")
-    try:
-        value = Fraction(text.strip())
-    except (ValueError, ZeroDivisionError) as exc:
-        raise ModelError(
-            errors.PATCH_OP, f"{tag}: event.p {text!r} is not an exact number"
-        ) from exc
-    if not 0 <= value <= 1:
-        raise ModelError(errors.PATCH_OP, f"{tag}: event.p must lie in [0,1], got {text!r}")
     if any(event["id"] == event_id for event in form["basic_events"]):
         raise ModelError(errors.PATCH_OP, f"{tag}: basic event {event_id!r} already exists")
     if any(gate["id"] == event_id for gate in form["gates"]):
         raise ModelError(errors.PATCH_OP, f"{tag}: id {event_id!r} is already a gate id")
+
+    if "rate" in spec:
+        # a NEW rate event goes through the same gate as an edit: lexical /
+        # unit / range checks, q re-evaluated at the model's declared
+        # precision, a fresh provenance record, and p derived from it. The
+        # first rate event in a plain-probability model also upgrades the
+        # schema version 0.1.0 -> 0.2.0, which is what lets the two-way
+        # semantics guard pass on the final form.
+        precision = _model_precision(form)
+        rate_spec = parse_rate_spec(spec["rate"], event_id)
+        q = mission_probability(rate_spec, precision)
+        entry = {
+            "id": event_id,
+            "p": exact_decimal_or_fraction(q),
+            "rate": rate_provenance(rate_spec, q, precision),
+        }
+        if form.get("schema_version") == "0.1.0" and not any(
+            "rate" in e for e in form["basic_events"]
+        ):
+            form["schema_version"] = "0.2.0"
+    else:
+        text = spec.get("p")
+        if not isinstance(text, str) or not text.strip():
+            raise ModelError(errors.PATCH_OP, f"{tag}: event.p must be a non-empty decimal string")
+        try:
+            value = Fraction(text.strip())
+        except (ValueError, ZeroDivisionError) as exc:
+            raise ModelError(
+                errors.PATCH_OP, f"{tag}: event.p {text!r} is not an exact number"
+            ) from exc
+        if not 0 <= value <= 1:
+            raise ModelError(errors.PATCH_OP, f"{tag}: event.p must lie in [0,1], got {text!r}")
+        entry = {"id": event_id, "p": exact_decimal_or_fraction(value)}
     # keep the events sorted by id (canonical invariant)
-    events = form["basic_events"] + [{"id": event_id, "p": exact_decimal_or_fraction(value)}]
+    events = form["basic_events"] + [entry]
     events.sort(key=lambda e: e["id"])
     form["basic_events"] = events
+
+
+def _model_precision(form: dict) -> int:
+    """The precision a NEW rate event should be converted at.
+
+    The canonical form itself does not carry a global precision field (only
+    each rate record does), so the model's declared default applies: the
+    domain default, 40 significant digits. An existing rate event's own
+    record always keeps ITS precision; this is only for additions.
+    """
+    existing = [e["rate"]["precision_digits"] for e in form.get("basic_events", []) if "rate" in e]
+    if existing:
+        return int(existing[0])  # keep additions consistent with the model
+    return DEFAULT_PRECISION_DIGITS
 
 
 def _op_remove_event(form: dict, op: dict, tag: str) -> None:
@@ -265,6 +307,25 @@ def _op_set_condition(form: dict, op: dict, tag: str) -> None:
     form["assumptions"]["condition"] = condition
 
 
+def _op_set_probability_semantics(form: dict, op: dict, tag: str) -> None:
+    """Explicitly re-declare what the model's probabilities MEAN.
+
+    This is the patch-level twin of choosing the semantics field in a model
+    file: bringing the FIRST rate event into a plain-probability model is a
+    change of declared assumptions, and assumptions are never flipped as a
+    side effect of an edit — the author states them. The final check still
+    enforces the two-way guard (rate events present ⟺ rate semantics), so a
+    stray flip cannot survive.
+    """
+    semantics = op.get("probability_semantics")
+    if semantics not in _PROBABILITY_SEMANTICS:
+        raise ModelError(
+            errors.PATCH_OP,
+            f"{tag}: probability_semantics must be one of {sorted(_PROBABILITY_SEMANTICS)}",
+        )
+    form["assumptions"]["probability_semantics"] = semantics
+
+
 _HANDLERS = {
     "set_event_probability": _op_set_event_probability,
     "set_event_rate": _op_set_event_rate,
@@ -275,6 +336,7 @@ _HANDLERS = {
     "remove_gate": _op_remove_gate,
     "set_top_event": _op_set_top_event,
     "set_condition": _op_set_condition,
+    "set_probability_semantics": _op_set_probability_semantics,
 }
 
 

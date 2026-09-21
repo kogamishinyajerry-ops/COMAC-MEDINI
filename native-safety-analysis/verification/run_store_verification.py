@@ -406,6 +406,26 @@ def expect_refusal(label: str, code_expected: str, fn) -> None:
         note_refusal(exc.code)
         if exc.code != code_expected:
             fail(f"{label}: expected {code_expected}, got {exc.code}")
+    except _RecordedInvalid as exc:
+        note_refusal(exc.code)
+        if exc.code != code_expected:
+            fail(f"{label}: expected {code_expected}, got {exc.code}")
+
+
+class _RecordedInvalid(Exception):
+    """A patch proposal recorded as invalid (patch_review does not raise)."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+def _require_invalid(record: dict) -> None:
+    if record.get("state") != "invalid":
+        raise StoreError(
+            "INTEGRITY", f"expected an invalid recording, got {record.get('state')!r}"
+        )
+    raise _RecordedInvalid(record.get("validation_code") or "?")
 
 
 def verify_state_machine(tmp: Path) -> Path:
@@ -698,6 +718,63 @@ def verify_state_machine(tmp: Path) -> Path:
         COVERAGE["patch_proposals"] += 1
         COVERAGE["rate_edits"] = COVERAGE.get("rate_edits", 0) + 1
 
+        # -- adding a NEW rate event to a plain-probability model: schema
+        # auto-upgrades with the first rate event; the semantics declaration
+        # is an explicit second operation (never a side effect); convergence
+        # with an equivalent mixed model must hold; the new event's q is
+        # checked against the oracle. NOTE: the model may have been patched
+        # earlier in this state machine (POP-P1 changed one probability), so
+        # the equivalent form is derived from the CURRENT baseline's stored
+        # canonical form, not from the original file.
+        new_rate = {
+            "model": "constant_failure_rate", "lambda": "2e-6", "lambda_unit": "1/h",
+            "mission_time": "500", "mission_time_unit": "h",
+            "repairable": False, "source": "verifier new channel",
+        }
+        add_rate_patch = repo.patch_review(
+            review_id="POP-P4", model_id=model_a.model_id,
+            expected_baseline_hash=repo.current_baseline_hash(model_a.model_id),
+            ops=[
+                {"op": "add_event", "event": {"id": "SENSOR2", "rate": new_rate}},
+                {"op": "set_probability_semantics",
+                 "probability_semantics": "fixed_mission_probability_from_constant_rate"},
+            ],
+            proposed_by="agent",
+        )
+        if add_rate_patch["state"] != "proposed":
+            fail(f"state: an add-rate patch was not proposed ({add_rate_patch['validation_code']})")
+        patched_canonical = json.loads(add_rate_patch["proposed_canonical_json"])
+        if patched_canonical["schema_version"] != "0.2.0":
+            fail("state: adding the first rate event did not upgrade the schema version")
+        new_event = next(e for e in patched_canonical["basic_events"] if e["id"] == "SENSOR2")
+        reference = oracle_q(Fraction("2e-6"), Fraction("500"))
+        if abs(Fraction(new_event["p"]) - reference) >= Fraction(1, 10**30):
+            fail("state: an added rate event's probability does not match the independent oracle")
+        equivalent_mixed = json.loads(
+            repo.conn.execute(
+                "SELECT canonical_json FROM baselines WHERE baseline_hash=?",
+                (repo.current_baseline_hash(model_a.model_id),),
+            ).fetchone()["canonical_json"]
+        )
+        equivalent_mixed["schema_version"] = "0.2.0"
+        equivalent_mixed["assumptions"]["probability_semantics"] = "fixed_mission_probability_from_constant_rate"
+        equivalent_mixed["basic_events"].append(
+            {"id": "SENSOR2", "p": new_event["p"], "rate": new_event["rate"]}
+        )
+        if add_rate_patch["proposed_hash"] != independent_canonical_hash(equivalent_mixed):
+            fail("state: add-rate patch and equivalent mixed form hash differently (convergence broken)")
+        expect_refusal(
+            "state: add a rate event without declaring the semantics (recorded invalid)", "PATCH_OP",
+            lambda: _require_invalid(repo.patch_review(
+                review_id="POP-P5", model_id=model_a.model_id,
+                expected_baseline_hash=repo.current_baseline_hash(model_a.model_id),
+                ops=[{"op": "add_event", "event": {"id": "SENSOR3", "rate": new_rate}}],
+                proposed_by="agent",
+            )),
+        )
+        COVERAGE["patch_proposals"] += 2
+        COVERAGE["rate_adds"] = COVERAGE.get("rate_adds", 0) + 1
+
         # the store's own integrity pass
         problems = repo.verify()
         for problem in problems:
@@ -941,7 +1018,8 @@ def main() -> int:
     print(f"  reverts applied       : {COVERAGE['reverts_applied']} "
           f"(stale re-derived in BOTH directions)")
     print(f"  patch proposals       : {COVERAGE['patch_proposals']} "
-          f"(incl. {COVERAGE.get('rate_edits', 0)} rate edit[s] checked against the oracle)")
+          f"(incl. {COVERAGE.get('rate_edits', 0)} rate edit[s], "
+          f"{COVERAGE.get('rate_adds', 0)} rate add[s] — all checked against the oracle)")
     print(f"  refusals triggered    : "
           + ", ".join(f"{code}x{n}" for code, n in sorted(COVERAGE["refusals"].items())))
     print(f"  population problems   : {population_problems}")
@@ -972,6 +1050,9 @@ def main() -> int:
         return 1
     if COVERAGE.get("rate_edits", 0) == 0:
         print("\nVACUOUS: the rate-edit patch path was never exercised against the oracle")
+        return 1
+    if COVERAGE.get("rate_adds", 0) == 0:
+        print("\nVACUOUS: the add-rate-event patch path was never exercised against the oracle")
         return 1
     print("\nstore verification: PASSED")
     return 0

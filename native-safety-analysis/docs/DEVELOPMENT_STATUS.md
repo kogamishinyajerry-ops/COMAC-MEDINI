@@ -11,12 +11,12 @@
 - `src/native_safety/store/`：**持久化适配层**（`schema.py` 迁移注册表 + 无浮点列审计，**schema v2 八表**；`repository.py` 仓储 + 幂等 run + 乐观并发 + stale 派生 + 评审状态机 + **FMEA 行/关联/候选闭环与追溯** + **关注项占位守卫与覆盖查询** + dump/restore + 自校验 `verify()`；`errors.py` 十五类存储错误码）。单文件 SQLite，只依赖标准库 `sqlite3`，不做校验、不做文件 IO
 - `src/native_safety/cli/`：validate / analyze / capabilities / **store**（init/status/runs/show/baseline/adopt-baseline/important/verify/export）/ **review**（propose/**patch**/**patch-preview**/**impact**/**revert**/list/show/decide/apply）/ **fmea**（rows/candidates/show/propose/**propose-from-importance**/decide/apply/trace），退出码 0/2/3/4/5；rate 模型额外输出 `rate_provenance[]`（每事件含 `interpretation`）、`probability_interpretation` 与强制非 per-flight-hour 警告；**`--importance {auto,on,off}`** 与 `importance_measures[]`（按 FV 降序）/`importance_status`/`importance_conventions`/`importance_exact`，报告含重要度表；`analyze --db` 增加 `store{status,...}` 块（被拒时如实标 refused 且退出码非零，但保留分析结果）
 - `verification/`：独立参考实现（真值表穷举 + Fraction，与生产内核零共享）、210 模型结构交叉对照脚本、**120 模型 rate 转换交叉对照脚本**（独立有理级数 oracle）、**120 模型重要度交叉对照脚本**（独立共因子 oracle + 真值表支持集判定，4072 项精确相等，附覆盖度统计）、**存储验证脚本**（raw sqlite3 读回 + 2ⁿ oracle 重推导 + 独立重哈希 + 9 项突变测试 + 往返测试）、**FMEA 验证脚本**（raw sqlite3 由列级原值独立重建规范形式并重哈希 + 状态机独立复跑 + **20 项突变测试** + 真空度闸门）
-- `tests/`：**297 项测试**（15 种子 + 12 结构拒绝 + 10 rate 拒绝 + 8 变形不变量 + rate 数值/边界不变量 + 22 项重要度 + 53 项存储 + **85 项 FMEA（校验拒绝/顺序不敏感/哈希边界/候选闭环/乐观并发/修订不可变/悬空关联/**重要度关注项**/往返/CLI 全流程）** + **24 项变更管理（纯函数 diff/词法噪音/order_only/impact 从库内读/revert 生命周期/stale 双向翻转/守卫/CLI）** + **47 项 patch（纯函数/按序应用/共享渲染/rate 守卫/收敛性/set_event_rate 转换闸门+oracle/22 种非法操作/环检测/CLI）** + 资源上限 + CLI/证据包集成 + 哈希稳定性 + 交叉验证）
+- `tests/`：**305 项测试**（15 种子 + 12 结构拒绝 + 10 rate 拒绝 + 8 变形不变量 + rate 数值/边界不变量 + 22 项重要度 + 53 项存储 + **85 项 FMEA（校验拒绝/顺序不敏感/哈希边界/候选闭环/乐观并发/修订不可变/悬空关联/**重要度关注项**/往返/CLI 全流程）** + **24 项变更管理（纯函数 diff/词法噪音/order_only/impact 从库内读/revert 生命周期/stale 双向翻转/守卫/CLI）** + **55 项 patch（纯函数/按序应用/共享渲染/rate 守卫/收敛性/set_event_rate+add_event(rate) 转换闸门+oracle/语义显式声明/schema 只升不降/22 种非法操作/环检测/CLI）** + 资源上限 + CLI/证据包集成 + 哈希稳定性 + 交叉验证）
 
 ## 实际执行并通过（2026-09-21）
 
 ```text
-python -m pytest tests/ -q                       → 297 passed in ~58s    (venv 3.13.12, pytest 9.1.1)
+python -m pytest tests/ -q                       → 305 passed in ~62s    (venv 3.13.12, pytest 9.1.1)
 python verification/run_cross_check.py           → 210/210 passed       (结构，Fraction 精确相等)
 python verification/run_rate_cross_check.py      → 120/120 passed       (rate，tolerance 1e-30，max diff 3.79e-41)
 python verification/run_importance_cross_check.py→ 120/120 passed       (重要度，4072 项精确相等，无容差)
@@ -74,7 +74,7 @@ n=400 → 0.13s；n=800 → 0.52s；n=1500 → 1.63s；n=3000 → 7.88s（BDD �
 - API / Web 工作台：未开始（30 天工作包序列；先 CLI → API → 再 UI）
 - PostgreSQL 迁移脚本：未开始（一期已备 `store export` 往返；团队版阶段）
 - **影响范围分析与 revert：已实现并验证**（`review impact` / `review revert`；revert 从库内自建提案，仍走两步人类批准）
-- **对象级 patch 语言：已实现并验证**（`review patch` / `review patch-preview`，九种操作、与全模型提案收敛）；**`set_event_rate` 编辑既有 rate 记录**已实现（转换闸门重跑 + 独立 oracle 对照）；新增 rate 事件仍待需要
+- **对象级 patch 语言：已实现并验证**（`review patch` / `review patch-preview`，十种操作、与全模型提案收敛）；**`set_event_rate` 编辑既有 rate 记录**与**`add_event(rate)` 新增 rate 事件**均已实现（转换闸门重跑 + 独立 oracle 对照 + 收敛性）；首个 rate 事件自动升 schema 0.2.0、语义声明须显式 `set_probability_semantics`、schema 只升不降
 - 适航/工具鉴定材料：未开始，本版本不作此声明
 
 ## 已知限制
@@ -97,7 +97,7 @@ n=400 → 0.13s；n=800 → 0.52s；n=1500 → 1.63s；n=3000 → 7.88s（BDD �
 16. **关注项只是工作项**：`fmea propose-from-importance` 的四个描述字段永远是 `[UNCONFIRMED]` 占位，组件/功能为 `*-UNASSIGNED`；带标记的行**无法**进入正式表（`FMEA_PLACEHOLDER`）。引擎不撰写 FMEA 内容，也不存在让它自动补全的路径
 17. 关注项生成只对**单一模型当前基线上的 run** 有效：run 已被取代即拒绝；跨模型/跨基线的重要性比较不在本版本定义范围
 18. **revert 只能回到本库持有过的基线**：没有库外的"旧版本回退"；diff 的 `order_only` 标注依赖 canonical-v1 保序这一事实，若未来哈希改为输入序不敏感需同步重审该判定
-19. **patch v1 边界**：`add_event` 仅普通概率事件；无移动/重命名；**rate 事件的 p 不可直设、编辑 rate 记录（λ/t/单位）未实现**——那需要自己的转换闸门与验证，不是 `set_event_probability` 的变体；patch 校验在规范形式层做（canonical 的 `n/d` 概率宽于模型输入词法，这是设计决定）
+19. **patch v1 边界**：无移动/重命名；既有普通事件不可"转成" rate 事件（删了重加是不同身份）；schema 只升不降（删光 rate 事件后终检拒绝，降级须显式决定）；patch 校验在规范形式层做（canonical 的 `n/d` 概率宽于模型输入词法，这是设计决定）
 20. impact/revert/patch 的批准者身份仍是 `--reviewer` 字符串 + 保留标识判断（权宜实现，同第 10 条）；认证层未接入
 
 ## 与开工提示词「最小交付链」的对照
@@ -112,7 +112,7 @@ n=400 → 0.13s；n=800 → 0.52s；n=1500 → 1.63s；n=3000 → 7.88s（BDD �
 | 6. FMEA 基础表 + 与基本事件的追溯（B05） | ✅（多对多关联；推断行强制说明且须人工批准；修订即新版本；独立验证 20/20 突变检出） |
 | 7. 重要度驱动的 FMEA 关注项 | ✅（生成带 `[UNCONFIRMED]` 标记的**工作项**；幂等、覆盖跳过、精确过滤；带标记的行无法入表） |
 | 8. 影响范围分析 + 一等公民 revert | ✅（`review impact` diff 两侧取自库内行；`review revert` 从基线表自建提案仍走两步人类批准；stale 双向重派生） |
-| 9. 对象级 patch 语言 | ✅（`review patch` 九种操作作用于库内规范形式；与等价全模型提案**收敛于同一哈希**；rate p 不可直设；`set_event_rate` 重跑转换闸门并对照独立 oracle；非法 patch 记 invalid） |
+| 9. 对象级 patch 语言 | ✅（`review patch` 十种操作作用于库内规范形式；与等价全模型提案**收敛于同一哈希**；rate p 不可直设；`set_event_rate`/`add_event(rate)` 重跑转换闸门并对照独立 oracle；schema 只升不降；非法 patch 记 invalid） |
 
 首 72 小时完成定义（无 UI）：读取 JSON、校验 AND/OR 图、独立计算概率、结构化输出、最小范围报告、测试通过、重复事件例题通过、未知门拒绝 —— **全部满足**。
 

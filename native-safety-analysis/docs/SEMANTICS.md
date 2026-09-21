@@ -233,13 +233,13 @@ review apply                                  （需要具名人类；把已批�
 ]
 ```
 
-九种操作：`set_event_probability` / `set_event_rate` / `add_event` / `remove_event` / `set_gate` / `add_gate` / `remove_gate` / `set_top_event` / `set_condition`。语义要点：
+十种操作：`set_event_probability` / `set_event_rate` / `add_event` / `remove_event` / `set_gate` / `add_gate` / `remove_gate` / `set_top_event` / `set_condition` / `set_probability_semantics`。语义要点：
 
 - **按序应用**：每个操作看到前一个的结果；最终形式作为整体再校验（引用可解析、全图无环——含不可达部分、K_OF_N 边界、双向语义守卫）。
 - **校验发生在规范形式层**（这是必须的）：canonical 把概率渲染为精确十进制或精确 `n/d` 有理文本（如 `1/3`），**宽于**模型输入词法——重建模型文件会无法合法表达 `1/3`。因此 patch 结果在其所在层独立校验，实质检查与 `validate_model` 相同。
 - **概率经共享渲染器**：`"0.250"` 与 `"0.25"` 产出**相同**规范形式（同一哈希）；`"1/3"` 被接受并精确保留。
 - **rate 事件的 p 不可直接设**：它由 λ·t 派生，`set_event_probability` 对带 `rate` 的事件 → `PATCH_OP` 拒绝。
-- **`set_event_rate` 编辑既有 rate 事件**（λ/t/单位），**完整重跑转换闸门**：词法/单位/范围检查（`parse_rate_spec`，保留原始错误码 `RATE_VALUE`/`RATE_UNITS`/`RATE_UNSUPPORTED`/`SOURCE`）→ `q = 1−exp(−λt)` 按该事件**已记录的精度**重求值 → 重写 provenance 记录并**重派生 p**。patched 的 rate 事件与经模型校验进来的 rate 事件携带同样保证——**没有绕过超越函数转换的捷径**；独立 oracle（纯有理级数）在声明容差 1e-30 内对照。普通概率事件不接受此操作（转换方向不提供）。
+- **`set_event_rate` 编辑既有 rate 事件**（λ/t/单位），**完整重跑转换闸门**（新增 rate 事件见 `add_event`）：词法/单位/范围检查（`parse_rate_spec`，保留原始错误码 `RATE_VALUE`/`RATE_UNITS`/`RATE_UNSUPPORTED`/`SOURCE`）→ `q = 1−exp(−λt)` 按该事件**已记录的精度**重求值 → 重写 provenance 记录并**重派生 p**。patched 的 rate 事件与经模型校验进来的 rate 事件携带同样保证——**没有绕过超越函数转换的捷径**；独立 oracle（纯有理级数）在声明容差 1e-30 内对照。普通概率事件不接受此操作（转换方向不提供）。
 - **删除被引用的对象被拒**：事件/门仍被门输入或顶事件引用时不可 `remove`（先改接或先删引用方）；自环与跨操作构造的环被终检拒绝。
 - **移除最后一个 rate 事件会触发双向语义守卫**：模型声明 `fixed_mission_probability_from_constant_rate` 却不再含 rate 事件 → 拒绝（反向同理）。
 - **patch 与整份模型提案收敛**：对同一语义变更（含 rate 编辑），两条入口（patch vs 全模型文件）产出**相同的 `proposed_hash`**——这是独立验证的一项契约（防止两条路径各自漂移出不同的规范形式）。
@@ -247,7 +247,14 @@ review apply                                  （需要具名人类；把已批�
 - `review patch-preview` 只读预览 diff（不记录）；`review impact` 对 patch 提案同样可用。
 - patch 之后的一切（decide/apply/守卫/revert/verify）**与其他提案完全同构**——没有 patch 专用通道。
 
-**v1 刻意排除**：`add_event` 只接受普通概率事件（**新增** rate 事件需完整 rate 闸门+语义守卫，待真实需要再做）；无"移动/重命名"操作（改名=删+增，语义上已是不同的事件）；patch 文件中无注释键（JSON 数组就是操作本身）。
+**v1 刻意排除**：无"移动/重命名"操作（改名=删+增，语义上已是不同的事件）；patch 文件中无注释键（JSON 数组就是操作本身）。
+
+**rate 事件的新增与语义声明**：
+
+- `add_event` 接受 `p`（普通概率）**或** `rate`（完整 rate 规格）。新增 rate 事件走与编辑**同一转换闸门**（词法/单位/范围 → q 按模型精度求值 → provenance + p 派生）；纯概率模型中**第一个** rate 事件进入时 schema 版本自动 0.1.0→0.2.0。
+- **语义声明是显式操作**：`set_probability_semantics`（与 `set_condition` 同级的假设编辑）。带 rate 事件而不声明 rate 语义、或声明而不带，都会被终检的**双向守卫**拒绝——**假设不被编辑的副作用翻转**，作者必须声明。
+- **schema 只升不降**：删光 rate 事件后 0.2.0 与 rate 语义声明保持原样，终检随之拒绝——降级是语义收窄的显式决定，不是删除的副作用。
+- 新增 rate 事件的**精度取模型口径**：已有 rate 事件则沿用其记录精度，否则用域默认（40 位有效数字）。收敛性与 oracle 对照同 `set_event_rate`。
 
 ## FMEA 基础表与追溯语义
 
@@ -381,7 +388,7 @@ fmea propose-from-importance <db> --run <run_id> [--by <度量>] [--top N] [--mi
 
 FMEA 侧同样明确排除：FMECA 的 severity/occurrence/detection/RPN、FMEDA、诊断覆盖率与失效率分配、组件/功能/要求的独立对象表。以上均为后续阶段项，本版本不接受、不近似。
 
-patch 侧的 v1 边界（详见"对象级 patch 语言"一节）：`add_event` 不接受 rate 事件（**新增** rate 事件需完整 rate 闸门 + 语义守卫，待真实需要）；`set_event_rate` 只编辑**既有** rate 事件（不提供普通概率→rate 的转换方向）；无移动/重命名操作。
+patch 侧的 v1 边界（详见"对象级 patch 语言"一节）：`set_event_rate` 只编辑**既有** rate 事件（不提供普通概率→rate 的转换方向）；**既有**普通事件也不可"转成" rate 事件（删了重加是不同的事件身份）；无移动/重命名操作。
 
 同样排除 **"引擎替人撰写 FMEA 内容"**：重要度只能指出**哪个事件值得关注**（并给出精确理由），不能产出失效模式、原因或影响。任何"自动填出失败模式"的行为都属于编造工程结论，本版本在数据结构层面就不提供该能力——关注项的四个描述字段只能以标记占位存在，且带标记的行**永远无法**进入正式表。
 
