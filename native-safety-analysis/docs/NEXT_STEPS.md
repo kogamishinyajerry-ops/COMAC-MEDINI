@@ -12,7 +12,7 @@
   - stale 为**派生量**：`stale ⟺ baseline_hash ≠ 模型当前基线`；旧 run 载荷完整保留，旧证据仍可读
   - 精确入库（§231）：概率/重要度全为精确十进制或精确 `n/d` 文本；库中无 REAL/FLOAT 列，且用 `typeof()` 逐值验证
   - 变更闭环：`review propose → decide（需具名人类）→ apply`；Agent 只能提案（§181），批准绑定基线与内容（过期批准 / 被篡改提案一律拒绝）
-  - CLI：`analyze --db`、`store {init,status,runs,show,baseline,adopt-baseline,important,verify,export}`、`review {propose,list,show,decide,apply}`
+  - CLI：`analyze --db`、`store {init,status,runs,show,baseline,adopt-baseline,important,verify,export}`、`review {propose,impact,revert,list,show,decide,apply}`
   - 独立验证：`verification/run_store_verification.py`（raw sqlite3 读回 + 2ⁿ oracle 重推导 1362 项精确相等；53 份基线独立重哈希；**9/9 突变被检出**；dump→restore 往返一致）
   - 过程中被抓出的真实缺陷：`record_run` 的基线与 run 写入原先分属两个事务（拒绝后留下孤儿基线）；`store.verify` 删掉一行重要度时漏报（自洽 ≠ 完整）
 
@@ -62,22 +62,36 @@
   - CLI：`fmea propose-from-importance <db> --run R [--by M] [--top N] [--min-value X]`
   - 独立验证：状态机上独立复跑（**标记字符串在验证脚本内另行列出**，不 import 生产常量），并新增突变"把未填写的关注项晋升入表（列/规范形式/哈希一致改写）"→ 被检出
 
+- **变更管理下一层：影响范围分析 + 一等公民 revert（B07 前半）** ✅
+  - 领域层 `domain/model_diff.py`：`diff_canonical_forms()` —— 两份规范形式的结构化 diff（纯函数、全 JSON、确定性）；`change_summary()` 给人读的计数
+  - **词法噪音在 diff 之前就没了**："0.10" 与 "0.1" 的规范形式相同 → diff 为空；门输入**仅重排**被如实报告为 changed 但标 `order_only`（canonical-v1 保序，哈希确实会变，但审阅者需要知道这是布尔等价编辑）
+  - `review impact <review_id>`：**从库内行**读提案规范形式与当前基线规范形式做 diff——分析不依赖任何模型文件，不可能与盘上实情漂移；同时报告 `baseline_still_current`（提案的期望基线是否还在位）
+  - `review revert --model-id M --target-baseline-hash H --review-id R`：**从基线表自建的提案**，绝不经手调用方提供的文件——"revert"若能夹带一个不同的模型就失去了意义
+    - 目标基线必须是**本库确实持有过的**（`REVERT_TARGET` 拒绝未知/他模型/当前基线）；存储规范形式重新哈希必须等于目标哈希（被旁路篡改 → `INTEGRITY`）
+    - revert 是普通提案：**仍需具名人类 decide + apply 两步**；重复往返 = 新提案 + 新期望（乐观并发不豁免）
+    - **基线行永不改写**：revert 只是把 `current_baseline_hash` 指回旧行（逐字节比对锁定）
+  - **修复 revert 暴露的真实缺陷**：stale 原来只升不降（`... AND stale=0`），revert 后回到当前基线的旧 run 会**永远卡在 stale**。修复：`_refresh_staleness_locked` 双向重派生（落下者置 1、回位者清 0 连同 reason）
+  - `store verify` 新增：applied review 的锚定基线必须**仍是其提案的重哈希**且存在于基线表（历史事实两侧都不许改）
+  - 独立验证：population 加一次完整 review 循环 + 一次 applied revert；状态机加 impact/revert 契约复跑（`REVERT_TARGET` 计入真空度闸门）；**突变增至 10 种**（新增"applied review 的锚定基线被改指"→ 被检出）
+  - 认证层（身份系统替代 `--reviewer` 字符串）：**仍未做**，待外部裁决（见"需要外部裁决"表）
+
 ## 立即可做的下一步（按优先级）
 
-1. **变更管理的下一层**
-   - 结构化 patch（当前提案是整份模型）+ 影响范围分析
-   - 回退：目前只能"再提案一次旧语义"；是否需要一等公民的 revert 命令待定
-   - 认证层接入，用身份系统替代 `--reviewer` 字符串 + 保留标识判断（见 VERIFICATION.md 待裁决项）
-
-2. **SCRAM 第三方差分评估**（前置阻塞）
+1. **SCRAM 第三方差分评估**（前置阻塞：GPL-3.0 合规裁决）
    - 先行工作：GPL-3.0 许可审查（法律/合规裁决，非工程决定）
    - 若可行：固定 commit、独立进程调用、对照协议（同模型双向转换损失报告）
    - 若不可行：记录裁决，另选差分策略（如自建第二 BDD 变体 + 变量序扰动）
+
+2. **对象级 patch 语言（B07 后半）**
+   - 当前提案仍是整份模型（revert 已能从库内自建提案，但**前向**修改仍需完整模型文件）
+   - 候选形态：对规范形式的编辑指令（增删改事件/门/重接输入），apply 时在库内展开为完整规范形式再走既有闭环——复用 impact diff 做 patch 的影响预览
+   - 认证层接入，用身份系统替代 `--reviewer` 字符串 + 保留标识判断（见 VERIFICATION.md 待裁决项）
 
 3. **重要度增量重算（B03 收尾之二，先测再优化）**
    - 单事件概率变更下只重算受影响度量（当前为全量 O(#节点)，已足够快）
    - ~~按度量排序的"关键事件 Top-N"汇总~~ ✅ `store important --by … --top N`
    - ~~高 FV / 高 RAW 事件驱动 FMEA 关注项~~ ✅ `fmea propose-from-importance`
+   - ~~影响范围分析 + 一等公民 revert~~ ✅ `review impact` / `review revert`
 
 ## 需要外部裁决的事项（不擅自决定）
 
@@ -107,4 +121,4 @@
 - 图数据库、微服务、Kubernetes
 - 前端工作台（先 CLI → API → 再 UI）
 - 任何"计算成功 = 安全结论"的表述；任何把工程变更批准等同于安全批准的表述
-- 结构化 patch 语言与对象级合并（先用整份模型的提案闭环跑通业务）
+- 对象级 patch 语言与合并（**前向**修改仍走整份模型提案；revert 已是一等公民但只回退到库内持有过的基线）

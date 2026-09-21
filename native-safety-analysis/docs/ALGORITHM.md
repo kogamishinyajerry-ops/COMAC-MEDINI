@@ -124,8 +124,9 @@ q−ᵢ = Σ_{v: level(v)=i} reach(v)·P(v.low)   +  T(i)
 | 支持集 | 图上"该层有节点" | `reference_importance.py`：真值表仅差一位的行配对比较 | **精确相等** |
 | 库内数值与 stale 标记 | 结构化列 + `payload_json` 两路序列化 | `verification/run_store_verification.py`：raw sqlite3 读回，用 2^n oracle **重新推导**，并独立重算基线哈希与 stale | **精确相等** |
 | FMEA 行规范形式与哈希 | `domain/fmea.py` 的 `canonical_fmea_form` + SHA-256 | `verification/run_fmea_verification.py`：由**列级原值**重新实现规范化与哈希，三方比对 | **精确相等**（20 种突变全部检出） |
+| applied review 锚定 | `reviews.proposed_hash` ↔ `applied_baseline_hash` | `run_store_verification.py`：raw sqlite3 用**独立重实现**的规范形式哈希复验（10 种突变含"锚定基线被改指"） | **精确相等** |
 
-六对实现均无共享代码路径、无共享算法。种子参考脚本 `reference/03_contracts/verify_seed_cases.py` 为开工包自带 oracle，与以上全部独立。
+七对实现均无共享代码路径、无共享算法。种子参考脚本 `reference/03_contracts/verify_seed_cases.py` 为开工包自带 oracle，与以上全部独立。
 
 ## 11. 持久化、基线与并发（`store/`）
 
@@ -148,15 +149,23 @@ q−ᵢ = Σ_{v: level(v)=i} reach(v)·P(v.low)   +  T(i)
 
 ### 11.4 stale 的派生方式
 
-`stale` 是**派生量**而非独立状态：`stale ⟺ run.baseline_hash ≠ models.current_baseline_hash`。换基线时一次性把落在旧基线上的 run 置 `stale=1` 并写入原因；旧载荷保持只读可用。
+`stale` 是**派生量**而非独立状态：`stale ⟺ run.baseline_hash ≠ models.current_baseline_hash`。换基线时用 `_refresh_staleness_locked` **双向**重派生：落在旧基线上的 run 置 `stale=1` 并写原因；**回到**当前基线的 run 清 `stale=0` 连同原因清空（revert 场景）。旧载荷保持只读可用。
 
-因为它是派生量，完整性检查可以直接**重算**它并与存储值比对——不依赖写入路径是否写对，也就不会出现"写错了却自洽"的情形。
+因为它是派生量，完整性检查可以直接**重算**它并与存储值比对——不依赖写入路径是否写对，也就不会出现"写错了却自洽"的情形。早期实现只置不清（`WHERE ... AND stale=0`），revert 后旧 run 会永远卡在 stale——这正是"派生量必须双向维护"的实例。
 
-### 11.5 精确性在存储上的落地
+### 11.5 影响范围分析与 revert（`domain/model_diff.py` + `store/`）
+
+- **diff 是纯函数**：`diff_canonical_forms(old, new)` 输入输出皆 JSON，确定性、可入库、可对照；比较按**规范内容**进行，词法噪音（"0.10" vs "0.1"）在 diff 之前就消失了。
+- **门输入仅重排**确实改变哈希（canonical-v1 保序），因此 diff 如实报告 changed，但额外标 `order_only=true`——布尔等价编辑与逻辑变更必须分得开。
+- `review impact` 的**两侧都从库内行读出**（提案的 `proposed_canonical_json` + 当前基线的 `canonical_json`）：分析不依赖模型文件，不可能与盘上实情漂移。
+- `review revert` 从**基线表自建**提案：读目标基线的 `canonical_json` → 重新哈希必须等于目标哈希（防旁路篡改）→ 以普通 `proposed` 提案入库。目标必须是该模型在本库持有过的基线，且不得是当前基线（`REVERT_TARGET`）。此后与任何提案完全同构：具名人类 decide → apply（复用 `_anchor_baseline_locked`，apply 侧的重哈希锚定检查同样生效）。
+- **没有"revert 专用快车道"**：不做 assume-yes、不跳审批、乐观并发不豁免——revert 的 revert 需要全新提案与全新期望哈希。
+
+### 11.6 精确性在存储上的落地
 
 写入时把结果里的 `Fraction` 用同一条渲染规则（§3）转成精确十进制或精确 `n/d` 文本；读回时用 `Fraction(text)` 还原。**往返无损**：`Fraction(store(x)) == x`，由测试逐字段锁定。重要度值按 run + event 存九列精确文本 + 未定义原因 JSON。
 
-### 11.6 迁移与往返
+### 11.7 迁移与往返
 
 `MIGRATIONS: {版本号 → DDL 语句元组}`，启动时按版本号升序补齐并写 `schema_meta`；版本高于引擎（库来自更新的世代）则拒绝打开，不尝试猜测兼容。`dump()` / `restore()` 提供确定性 JSON 往返（表按主键排序），既服务于 PostgreSQL 迁移，也是"备份可恢复"的实测手段。
 
@@ -221,7 +230,7 @@ FMEA 基础表承载**失效模式、原因、局部/系统影响、现有控制
 - rate 转换仅覆盖恒定失效率 + 不可修复 + 显式任务时间；修复/潜伏/非恒定率显式拒绝
 - 重要度仅在相干模型内有定义（与本引擎的模型边界一致）；`Q=0` 或 `q−ᵢ=0` 的未定义项如实上报，不填占位数字
 - 存储为**单写者**模型：靠写入时校验预期基线实现乐观并发，不做行级锁；多写者阶段在此扩展
-- 变更管理只覆盖"提案 → 决定 → 应用"的最小闭环，无结构化 patch 语言（当前提案即一份完整模型）；无回退命令（回退＝再提案一次旧语义）
+- 变更管理：影响范围分析（`review impact`，`domain/model_diff.py` 的纯函数 diff，两侧取自库内行）与一等公民 revert（`review revert`，从基线表自建提案、仍走两步人类批准）已实现；**前向**修改仍无对象级 patch 语言（提案即一份完整模型）；认证层未接入
 - FMEA 基础表**不含**严重度/发生度/探测度/RPN，不做风险排序（FMECA/FMEDA 不在范围）；悬空关联只报告不自动修复
 - 引擎**不撰写** FMEA 内容：重要度只能产出带标记的**工作项**，四个描述字段必须由人填写；带标记的行永远无法入表，也不存在"自动补全失效模式"的路径
 - 单线程；未做原生加速（规划中按实测瓶颈决定）

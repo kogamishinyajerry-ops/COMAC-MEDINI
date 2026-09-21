@@ -46,6 +46,9 @@ BAD_ARGUMENT = "STORE_BAD_ARGUMENT"
 APPROVAL_AUTHORITY = "APPROVAL_AUTHORITY"
 # Integrity verification of the stored database failed.
 INTEGRITY = "INTEGRITY"
+# A revert was requested against a baseline that is not the model's current
+# one, or whose canonical form no longer re-hashes to the recorded hash.
+REVERT_TARGET = "REVERT_TARGET"
 
 # Codes the CLI reports as "unsupported semantics" (exit 3) rather than
 # "invalid input" (exit 2). An engine/DB generation mismatch is an

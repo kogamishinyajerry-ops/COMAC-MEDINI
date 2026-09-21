@@ -890,6 +890,48 @@ def cmd_review(args: argparse.Namespace) -> int:
             _emit(_store_payload("review show", status="ok", review=record))
             return EXIT_OK
 
+        if command == "impact":
+            try:
+                with SqliteRepository(args.db) as repo:
+                    impact = repo.review_impact(args.review_id)
+            except StoreError as exc:
+                return _store_refusal(exc.code, exc.message)
+            _emit(_store_payload(
+                "review impact", status="ok",
+                model_id=impact["model_id"], state=impact["state"],
+                against_baseline_hash=impact["against_baseline_hash"],
+                expected_baseline_hash=impact["expected_baseline_hash"],
+                baseline_still_current=impact["baseline_still_current"],
+                summary=impact["summary"], diff=impact["diff"],
+                note="both sides come from rows the store already holds (the proposal's canonical "
+                     "form and the current baseline), so the analysis cannot drift from what is "
+                     "actually on disk; it states facts, it does not decide acceptability",
+            ))
+            return EXIT_OK
+
+        if command == "revert":
+            try:
+                with SqliteRepository(args.db) as repo:
+                    impact = repo.baseline_impact(args.model_id, args.target_baseline_hash)
+                    record = repo.propose_revert(
+                        review_id=args.review_id,
+                        model_id=args.model_id,
+                        target_baseline_hash=args.target_baseline_hash,
+                        expected_baseline_hash=repo.current_baseline_hash(args.model_id),
+                        proposed_by=args.reviewer,
+                        note=args.note,
+                    )
+            except StoreError as exc:
+                return _store_refusal(exc.code, exc.message)
+            _emit(_store_payload(
+                "review revert", status="ok", review=record,
+                impact=impact["summary"], diff=impact["diff"],
+                note="the proposal is built from the baseline table's own canonical form, never "
+                     "from a caller-supplied file; decide and apply it like any other review "
+                     "(a named human, two explicit steps)",
+            ))
+            return EXIT_OK
+
         if command == "decide":
             with SqliteRepository(args.db) as repo:
                 record = repo.decide_review(
@@ -1249,6 +1291,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_r = review_sub.add_parser("show", help="show one review")
     p_r.add_argument("db")
     p_r.add_argument("review_id")
+    p_r.set_defaults(func=cmd_review)
+
+    p_r = review_sub.add_parser(
+        "impact", help="what applying this review would change (read from the store alone)"
+    )
+    p_r.add_argument("db")
+    p_r.add_argument("review_id")
+    p_r.set_defaults(func=cmd_review)
+
+    p_r = review_sub.add_parser(
+        "revert",
+        help="propose going back to a previously held baseline (built from the store, "
+             "never from a caller-supplied file)",
+    )
+    p_r.add_argument("db")
+    p_r.add_argument("--model-id", required=True)
+    p_r.add_argument("--target-baseline-hash", required=True,
+                     help="the baseline to go back to (`store baseline <model> --all` lists them)")
+    p_r.add_argument("--review-id", required=True)
+    p_r.add_argument("--reviewer", default="agent",
+                     help="who proposes (default: agent — an agent may propose but never approve)")
+    p_r.add_argument("--note", default=None)
     p_r.set_defaults(func=cmd_review)
 
     p_r = review_sub.add_parser("decide", help="approve or reject a proposal (requires a human)")

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from fractions import Fraction
@@ -51,6 +52,7 @@ from ..domain.fmea import (
     validate_fmea_row,
 )
 from ..domain.model import StaticFtaModel
+from ..domain.model_diff import change_summary, diff_canonical_forms
 from ..domain.ratnum import exact_decimal, exact_decimal_or_fraction
 from ..domain.semantic_hash import (
     canonical_model_form,
@@ -306,10 +308,7 @@ class SqliteRepository:
             "UPDATE models SET current_baseline_hash=? WHERE model_id=?",
             (baseline_hash, model.model_id),
         )
-        self.conn.execute(
-            "UPDATE runs SET stale=1, stale_reason=? WHERE model_id=? AND baseline_hash<>? AND stale=0",
-            (f"baseline superseded by {baseline_hash} on {now}", model.model_id, baseline_hash),
-        )
+        self._refresh_staleness_locked(self.conn, model.model_id, baseline_hash, now)
         return baseline_hash, self._stale_run_ids(model.model_id)
 
     def _stale_run_ids(self, model_id: str) -> tuple[str, ...]:
@@ -574,6 +573,145 @@ class SqliteRepository:
         row = self.conn.execute("SELECT * FROM reviews WHERE review_id=?", (review_id,)).fetchone()
         return dict(row) if row else None
 
+    def review_impact(self, review_id: str) -> dict:
+        """What applying this review would change, read from the store alone.
+
+        Diffs the proposal's canonical form against the model's CURRENT
+        baseline canonical form. No model files are involved: both sides come
+        from rows the store already holds, which is what makes the analysis
+        honest — it cannot drift from what is actually on disk.
+        """
+        record = self.get_review(review_id)
+        if record is None:
+            raise StoreError(errors.REVIEW_NOT_FOUND, f"no review {review_id!r}")
+        if record["proposed_canonical_json"] is None:
+            raise StoreError(
+                errors.REVIEW_STATE,
+                f"review {review_id!r} carries no valid proposed model to analyse",
+            )
+        current = self.current_baseline_hash(record["model_id"])
+        current_canonical = None
+        if current is not None:
+            row = self.conn.execute(
+                "SELECT canonical_json FROM baselines WHERE baseline_hash=?", (current,)
+            ).fetchone()
+            if row is not None:
+                current_canonical = json.loads(row["canonical_json"])
+        proposed_canonical = json.loads(record["proposed_canonical_json"])
+        diff = diff_canonical_forms(current_canonical, proposed_canonical)
+        return {
+            "review_id": review_id,
+            "model_id": record["model_id"],
+            "state": record["state"],
+            "against_baseline_hash": current,
+            "expected_baseline_hash": record["expected_baseline_hash"],
+            "baseline_still_current": record["expected_baseline_hash"] == current,
+            "diff": diff,
+            "summary": change_summary(diff),
+        }
+
+    def baseline_impact(self, model_id: str, baseline_hash: str) -> dict:
+        """Diff one stored baseline against the model's current baseline.
+
+        This is the read-only half of a revert: "if we went back to that
+        baseline, what would change?" Both forms come from the baseline table.
+        """
+        row = self.conn.execute(
+            "SELECT canonical_json FROM baselines WHERE baseline_hash=? AND model_id=?",
+            (baseline_hash, model_id),
+        ).fetchone()
+        if row is None:
+            raise StoreError(
+                errors.REVERT_TARGET,
+                f"model {model_id!r} has no baseline {baseline_hash[:12]}… in this store",
+            )
+        current = self.current_baseline_hash(model_id)
+        current_canonical = None
+        if current is not None and current != baseline_hash:
+            crow = self.conn.execute(
+                "SELECT canonical_json FROM baselines WHERE baseline_hash=?", (current,)
+            ).fetchone()
+            if crow is not None:
+                current_canonical = json.loads(crow["canonical_json"])
+        elif current == baseline_hash:
+            current_canonical = json.loads(row["canonical_json"])
+        target_canonical = json.loads(row["canonical_json"])
+        diff = diff_canonical_forms(current_canonical, target_canonical)
+        return {
+            "model_id": model_id,
+            "target_baseline_hash": baseline_hash,
+            "current_baseline_hash": current,
+            "is_current": current == baseline_hash,
+            "diff": diff,
+            "summary": change_summary(diff),
+        }
+
+    def propose_revert(
+        self,
+        *,
+        review_id: str,
+        model_id: str,
+        target_baseline_hash: str,
+        expected_baseline_hash: str,
+        proposed_by: str,
+        note: str | None = None,
+    ) -> dict:
+        """Propose going back to a previously held baseline — from the store.
+
+        The proposal is built from the baseline table's own canonical form,
+        never from a file the caller supplies: a "revert" that could smuggle in
+        a different model under the same claim would defeat the point. The
+        stored form is re-hashed and must equal the requested baseline hash,
+        otherwise the target is not what the caller thinks it is.
+        """
+        row = self.conn.execute(
+            "SELECT canonical_json, model_id FROM baselines WHERE baseline_hash=?",
+            (target_baseline_hash,),
+        ).fetchone()
+        if row is None or row["model_id"] != model_id:
+            raise StoreError(
+                errors.REVERT_TARGET,
+                f"model {model_id!r} has no baseline {target_baseline_hash[:12]}… in this store; "
+                "a revert may only target a baseline this store has actually held",
+            )
+        canonical = json.loads(row["canonical_json"])
+        anchored = hash_canonical_form(canonical)
+        if anchored != target_baseline_hash:
+            raise StoreError(
+                errors.INTEGRITY,
+                f"stored baseline {target_baseline_hash[:12]}… no longer re-hashes to itself; "
+                "refusing to build a revert on it",
+            )
+        if target_baseline_hash == expected_baseline_hash:
+            raise StoreError(
+                errors.REVERT_TARGET,
+                f"baseline {target_baseline_hash[:12]}… is already the current baseline of "
+                f"model {model_id!r}; there is nothing to revert",
+            )
+        canonical_json = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        observed = self.current_baseline_hash(model_id)
+        if expected_baseline_hash != observed:
+            raise StoreError(
+                errors.BASELINE_CONFLICT,
+                f"revert was written against baseline {expected_baseline_hash[:12]}… but the store "
+                f"holds {(observed or '(none)')[:12]}… for model {model_id!r}; rebase the revert",
+            )
+        now = _utc_now()
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO reviews(review_id, model_id, expected_baseline_hash, observed_baseline_hash,"
+                " proposed_hash, proposed_canonical_json, state, validation_code, validation_message,"
+                " note, proposed_by, created_utc)"
+                " VALUES(?,?,?,?,?,?, 'proposed', NULL, NULL, ?, ?, ?)",
+                (
+                    review_id, model_id, expected_baseline_hash, observed,
+                    anchored, canonical_json,
+                    note or f"revert to baseline {target_baseline_hash[:12]}…",
+                    proposed_by, now,
+                ),
+            )
+        return self.get_review(review_id)
+
     def list_reviews(self, *, state: str | None = None, model_id: str | None = None) -> list[dict]:
         sql, params, clauses = "SELECT * FROM reviews", [], []
         if state is not None:
@@ -684,11 +822,30 @@ class SqliteRepository:
             "UPDATE models SET current_baseline_hash=?, last_seen_utc=? WHERE model_id=?",
             (baseline_hash, now, model_id),
         )
-        self.conn.execute(
-            "UPDATE runs SET stale=1, stale_reason=? WHERE model_id=? AND baseline_hash<>? AND stale=0",
-            (f"baseline superseded by {baseline_hash} on {now}", model_id, baseline_hash),
-        )
+        self._refresh_staleness_locked(self.conn, model_id, baseline_hash, now)
         return self._stale_run_ids(model_id)
+
+    @staticmethod
+    def _refresh_staleness_locked(
+        conn: sqlite3.Connection, model_id: str, baseline_hash: str, now: str
+    ) -> None:
+        """Re-derive the stale flags of one model around its current baseline.
+
+        Stale is a DERIVED quantity (stale ⟺ run.baseline_hash ≠ current), so
+        a baseline move must both raise the flag on runs that fell off the
+        current baseline AND CLEAR it on runs that are back on it — which is
+        exactly what happens after a revert: the old runs become current
+        again. Assumes a transaction is OPEN.
+        """
+        reason = f"baseline superseded by {baseline_hash} on {now}"
+        conn.execute(
+            "UPDATE runs SET stale=1, stale_reason=? WHERE model_id=? AND baseline_hash<>? AND stale=0",
+            (reason, model_id, baseline_hash),
+        )
+        conn.execute(
+            "UPDATE runs SET stale=0, stale_reason=NULL WHERE model_id=? AND baseline_hash=? AND stale=1",
+            (model_id, baseline_hash),
+        )
 
     # ------------------------------------------------------------------ FMEA
     def baseline_event_ids(self, model_id: str) -> frozenset[str] | None:
@@ -1240,9 +1397,34 @@ class SqliteRepository:
 
             problems.extend(self._verify_importance(run, payload))
 
-        for row in self.conn.execute("SELECT state FROM reviews"):
+        for row in self.conn.execute("SELECT * FROM reviews"):
+            tag = f"review {row['review_id']!r}"
             if row["state"] not in REVIEW_STATES:
-                problems.append(f"review state {row['state']!r} is not a known state")
+                problems.append(f"{tag}: state {row['state']!r} is not a known state")
+                continue
+            if row["state"] == "applied":
+                # the applied record must still re-hash to its own proposal,
+                # and the anchored baseline must still exist (an applied change
+                # is a fact about history; neither side may be edited later)
+                if row["applied_baseline_hash"] is None or row["proposed_canonical_json"] is None:
+                    problems.append(f"{tag}: applied but carries no anchored baseline/proposal")
+                    continue
+                canonical = None
+                try:
+                    canonical = json.loads(row["proposed_canonical_json"])
+                except json.JSONDecodeError:
+                    problems.append(f"{tag}: proposed canonical form is not JSON")
+                if canonical is not None:
+                    recomputed = hash_canonical_form(canonical)
+                    if recomputed != row["proposed_hash"]:
+                        problems.append(f"{tag}: proposal no longer re-hashes to its recorded hash")
+                    if recomputed != row["applied_baseline_hash"]:
+                        problems.append(f"{tag}: anchored baseline is not the hash of what was proposed")
+                exists = self.conn.execute(
+                    "SELECT 1 FROM baselines WHERE baseline_hash=?", (row["applied_baseline_hash"],)
+                ).fetchone()
+                if exists is None:
+                    problems.append(f"{tag}: anchored baseline is missing from the baselines table")
 
         problems.extend(self._verify_fmea())
 

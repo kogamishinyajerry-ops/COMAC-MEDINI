@@ -171,12 +171,16 @@ Q = qᵢ·q+ᵢ + (1 − qᵢ)·q−ᵢ          （多重线性恒等式，无�
 
 - 每个模型有一个 `current_baseline_hash`。**run 的 `baseline_hash` 不等于其模型当前基线 ⟺ 该 run 被标 stale**，且必须带 `stale_reason`。
 - 换基线（评审 apply 或显式 adopt）时，同模型下落在旧基线上的 run 一律置 stale，并**保留其完整载荷**——旧版证据仍可查看，只是不再代表当前语义。
+- **stale 是派生量，双向维护**：基线移动（含 revert）后，回到当前基线的旧 run **清除** stale 与 stale_reason，落下的 run 置 stale。"只升不降"会让 revert 后的旧 run 永远卡在 stale（曾有此缺陷，已修复并锁进测试）。
 - 上述等价关系由验证独立重算（不由被测对象自述）。
 
 ### 变更管理最小闭环（§195-196）
 
 ```
 review propose   --expected-baseline-hash H   （校验提案；不改变任何基线）
+review impact    <review_id>                  （只读：提案 ↔ 当前基线的结构化 diff，两侧均取自库内行）
+review revert    --model-id M --target-baseline-hash H --review-id R
+                                              （从基线表自建一份"回到 H"的提案；不改变任何基线）
 review decide    --approve | --reject         （需要具名人类）
 review apply                                  （需要具名人类；把已批准语义设为当前基线并传播 stale）
 ```
@@ -190,6 +194,28 @@ review apply                                  （需要具名人类；把已批�
 3. **批准绑定内容**。`apply` 时把已批准的规范形式**重新哈希**并与提案记录的哈希比对；不一致（例如库被旁路修改）则 `INTEGRITY` 拒绝，绝不把被改过的内容设为基线。
 
 **存储层不授予任何批准权**：无论评审走到哪一步，结果信封的 `approval_state` 恒为 `not_granted_by_this_result`。`reviews` 表记录的是工程变更的决定，不是安全结论的批准。
+
+### 影响范围分析（impact）
+
+`review impact <review_id>` 输出提案规范形式与**当前基线**规范形式的结构化 diff（`model-diff-v1`）：
+
+- **两侧都从库内行读出**——不依赖任何模型文件，分析不可能与盘上实情漂移；同时报告 `baseline_still_current`（提案期望的基线是否仍在位）。
+- 事件/门各分 `added` / `removed` / `changed` / `unchanged`；概率变更以**精确文本**给出（`"0.1"` → `"0.3"`）。
+- **词法噪音在 diff 之前就消失**："0.10" 与 "0.1" 的规范形式相同，diff 为空。
+- 门输入**仅重排**被如实报告为 changed 但标 `order_only=true`：canonical-v1 保序、哈希确实会变，但审阅者需要知道这是布尔等价编辑而非逻辑变更。
+- 假设块 / `schema_version` / `model_id` / `top_event` 的变化各自单列。
+- diff **只陈述事实，不裁决可接受性**——批准权仍在具名人类（§181）。
+
+### 一等公民 revert
+
+`review revert` 把"回到某个旧基线"变成一份**普通提案**，但有一个额外的硬约束：
+
+- **提案从基线表自建**：目标必须是**该模型在本库确实持有过**的基线（`store baseline <model> --all` 列出）；未知哈希 / 他模型的基线 / 当前基线 → `REVERT_TARGET` 拒绝。调用方**不能**提供文件——"revert"若能夹带一个不同的模型就失去了意义。
+- 目标基线的存储规范形式**重新哈希必须等于目标哈希**（被旁路篡改 → `INTEGRITY` 拒绝）。
+- 之后走与任何提案相同的两步：具名人类 `decide` → `apply`。**没有 `--assume-yes`**，也没有跳过审批的路径。
+- **基线行永不改写**（§203）：revert 只把 `models.current_baseline_hash` 指回旧行；两条基线行逐字节不变。
+- **stale 双向重派生**：回到当前基线的旧 run 清除 stale 与 stale_reason；落在后面的新 run 置 stale。旧载荷始终完整保留。
+- 再次往返（revert 的 revert）需要**全新提案与全新期望哈希**——乐观并发对回退不豁免。
 
 ## FMEA 基础表与追溯语义
 
@@ -292,7 +318,7 @@ fmea propose-from-importance <db> --run <run_id> [--by <度量>] [--top N] [--mi
 | UNSUPPORTED_GATE, RATE_UNSUPPORTED | 3（不支持） |
 | STORE_SCHEMA_MISMATCH（库由不兼容的 schema 世代写入） | 3（不支持） |
 | VERSION, ASSUMPTIONS, ID, DUPLICATE_ID, INPUTS, SOURCE, PROBABILITY, RATE_VALUE, RATE_UNITS, K_OF_N, UNKNOWN_REFERENCE, CYCLE, TOP_EVENT, SIZE_LIMIT, PARSE, IO, FMEA_INPUTS, FMEA_ID, FMEA_SOURCE, FMEA_LINK | 2（非法输入） |
-| RUN_ID_CONFLICT, BASELINE_NOT_CURRENT, BASELINE_CONFLICT, REVIEW_NOT_FOUND, RUN_NOT_FOUND, MODEL_NOT_FOUND, REVIEW_STATE, APPROVAL_AUTHORITY, STORE_BAD_ARGUMENT, STORE_IO, FMEA_NOT_FOUND, FMEA_STATE, FMEA_REVISION_CONFLICT, FMEA_PLACEHOLDER | 2（请求被拒） |
+| RUN_ID_CONFLICT, BASELINE_NOT_CURRENT, BASELINE_CONFLICT, REVIEW_NOT_FOUND, RUN_NOT_FOUND, MODEL_NOT_FOUND, REVIEW_STATE, APPROVAL_AUTHORITY, STORE_BAD_ARGUMENT, STORE_IO, FMEA_NOT_FOUND, FMEA_STATE, FMEA_REVISION_CONFLICT, FMEA_PLACEHOLDER, REVERT_TARGET | 2（请求被拒） |
 | INTEGRITY（`store verify` 发现库内不一致） | 5 |
 | 节点/路径上限触发 | 4（资源受限，非错误，结果标 resource_limited） |
 | 内部异常 | 5 |
@@ -321,7 +347,7 @@ fmea propose-from-importance <db> --run <run_id> [--by <度量>] [--top N] [--mi
 
 动态门、顺序失效、修复过程、潜伏/检查间隔、未建模相关性/共因、NOT/非相干逻辑、任意概率分布表达式、软件失效随机化、非恒定失效率（Weibull/老化）。以上任何一项出现在输入中都会导致明确拒绝，不会退化为 AND/OR。
 
-FMEA 侧同样明确排除：FMECA 的 severity/occurrence/detection/RPN、FMEDA、诊断覆盖率与失效率分配、组件/功能/要求的独立对象表、结构化 patch 语言。以上均为后续阶段项，本版本不接受、不近似。
+FMEA 侧同样明确排除：FMECA 的 severity/occurrence/detection/RPN、FMEDA、诊断覆盖率与失效率分配、组件/功能/要求的独立对象表、**前向修改的对象级 patch 语言**（revert 与影响分析已实现；前向提案仍为整份模型）。以上均为后续阶段项，本版本不接受、不近似。
 
 同样排除 **"引擎替人撰写 FMEA 内容"**：重要度只能指出**哪个事件值得关注**（并给出精确理由），不能产出失效模式、原因或影响。任何"自动填出失败模式"的行为都属于编造工程结论，本版本在数据结构层面就不提供该能力——关注项的四个描述字段只能以标记占位存在，且带标记的行**永远无法**进入正式表。
 

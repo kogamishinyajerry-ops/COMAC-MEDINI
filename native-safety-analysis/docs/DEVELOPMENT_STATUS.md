@@ -9,18 +9,18 @@
 - `src/native_safety/adapters/`：防御性 JSON 读取、契约词法概率输出
 - `src/native_safety/evidence/`：run_<id>/ 证据包（manifest/inputs/results/reports/execution，SHA-256 工件哈希）
 - `src/native_safety/store/`：**持久化适配层**（`schema.py` 迁移注册表 + 无浮点列审计，**schema v2 八表**；`repository.py` 仓储 + 幂等 run + 乐观并发 + stale 派生 + 评审状态机 + **FMEA 行/关联/候选闭环与追溯** + **关注项占位守卫与覆盖查询** + dump/restore + 自校验 `verify()`；`errors.py` 十五类存储错误码）。单文件 SQLite，只依赖标准库 `sqlite3`，不做校验、不做文件 IO
-- `src/native_safety/cli/`：validate / analyze / capabilities / **store**（init/status/runs/show/baseline/adopt-baseline/important/verify/export）/ **review**（propose/list/show/decide/apply）/ **fmea**（rows/candidates/show/propose/**propose-from-importance**/decide/apply/trace），退出码 0/2/3/4/5；rate 模型额外输出 `rate_provenance[]`（每事件含 `interpretation`）、`probability_interpretation` 与强制非 per-flight-hour 警告；**`--importance {auto,on,off}`** 与 `importance_measures[]`（按 FV 降序）/`importance_status`/`importance_conventions`/`importance_exact`，报告含重要度表；`analyze --db` 增加 `store{status,...}` 块（被拒时如实标 refused 且退出码非零，但保留分析结果）
+- `src/native_safety/cli/`：validate / analyze / capabilities / **store**（init/status/runs/show/baseline/adopt-baseline/important/verify/export）/ **review**（propose/**impact**/**revert**/list/show/decide/apply）/ **fmea**（rows/candidates/show/propose/**propose-from-importance**/decide/apply/trace），退出码 0/2/3/4/5；rate 模型额外输出 `rate_provenance[]`（每事件含 `interpretation`）、`probability_interpretation` 与强制非 per-flight-hour 警告；**`--importance {auto,on,off}`** 与 `importance_measures[]`（按 FV 降序）/`importance_status`/`importance_conventions`/`importance_exact`，报告含重要度表；`analyze --db` 增加 `store{status,...}` 块（被拒时如实标 refused 且退出码非零，但保留分析结果）
 - `verification/`：独立参考实现（真值表穷举 + Fraction，与生产内核零共享）、210 模型结构交叉对照脚本、**120 模型 rate 转换交叉对照脚本**（独立有理级数 oracle）、**120 模型重要度交叉对照脚本**（独立共因子 oracle + 真值表支持集判定，4072 项精确相等，附覆盖度统计）、**存储验证脚本**（raw sqlite3 读回 + 2ⁿ oracle 重推导 + 独立重哈希 + 9 项突变测试 + 往返测试）、**FMEA 验证脚本**（raw sqlite3 由列级原值独立重建规范形式并重哈希 + 状态机独立复跑 + **20 项突变测试** + 真空度闸门）
-- `tests/`：**226 项测试**（15 种子 + 12 结构拒绝 + 10 rate 拒绝 + 8 变形不变量 + rate 数值/边界不变量 + 22 项重要度 + 53 项存储 + **85 项 FMEA（校验拒绝/顺序不敏感/哈希边界/候选闭环/乐观并发/修订不可变/悬空关联/**重要度关注项**/往返/CLI 全流程）** + 资源上限 + CLI/证据包集成 + 哈希稳定性 + 交叉验证）
+- `tests/`：**250 项测试**（15 种子 + 12 结构拒绝 + 10 rate 拒绝 + 8 变形不变量 + rate 数值/边界不变量 + 22 项重要度 + 53 项存储 + **85 项 FMEA（校验拒绝/顺序不敏感/哈希边界/候选闭环/乐观并发/修订不可变/悬空关联/**重要度关注项**/往返/CLI 全流程）** + **24 项变更管理（纯函数 diff/词法噪音/order_only/impact 从库内读/revert 生命周期/stale 双向翻转/守卫/CLI）** + 资源上限 + CLI/证据包集成 + 哈希稳定性 + 交叉验证）
 
 ## 实际执行并通过（2026-09-21）
 
 ```text
-python -m pytest tests/ -q                       → 226 passed in ~37s    (venv 3.13.12, pytest 9.1.1)
+python -m pytest tests/ -q                       → 250 passed in ~51s    (venv 3.13.12, pytest 9.1.1)
 python verification/run_cross_check.py           → 210/210 passed       (结构，Fraction 精确相等)
 python verification/run_rate_cross_check.py      → 120/120 passed       (rate，tolerance 1e-30，max diff 3.79e-41)
 python verification/run_importance_cross_check.py→ 120/120 passed       (重要度，4072 项精确相等，无容差)
-python verification/run_store_verification.py    → PASSED               (存储，1362 项重推导精确相等；9/9 突变被检出)
+python verification/run_store_verification.py    → PASSED               (存储，1362 项重推导精确相等；含 impact/revert 契约；10/10 突变被检出)
 python verification/run_fmea_verification.py     → PASSED               (FMEA，17 行独立重哈希；34 条关联；20/20 突变被检出)
 python run.py analyze …R01_rate_and… --evidence-dir … → succeeded, schema 0.2.0, p=1.997002664917588e-6, exit 0
 python run.py analyze …M03…                      → status succeeded, p=0.044, exit 0, importance ranked A/C/B
@@ -30,6 +30,12 @@ python run.py analyze …M02… --db store.sqlite --run-id=<已用> → RUN_ID_C
 python run.py store verify store.sqlite          → problems=[], exit 0
 python run.py review decide … --reviewer agent   → APPROVAL_AUTHORITY, exit 2
 python run.py review apply  … --reviewer JerryKogami → applied, 旧 run 标 stale, exit 0
+python run.py review impact <db> REV-1         → 结构化 diff（事件/门/假设/顶事件增删改）, exit 0
+python run.py review revert <db> --model-id M --target-baseline-hash <本库持有过的> --review-id RV-1
+                                                              → 提案自建自库, exit 0
+python run.py review revert <db> … --target-baseline-hash <当前基线> → REVERT_TARGET, exit 2
+python run.py review revert <db> … （agent 决定）             → APPROVAL_AUTHORITY, exit 2
+python run.py review apply  <db> RV-1 --reviewer JerryKogami → 旧基线恢复, stale 双向翻转, verify 干净
 python run.py fmea propose … --source inference --inference-note "…" → draft，正式表仍为空, exit 0
 python run.py fmea propose … --source inference（缺说明）          → FMEA_SOURCE, exit 2
 python run.py fmea decide  … --reviewer agent    → APPROVAL_AUTHORITY, exit 2
@@ -62,7 +68,8 @@ n=400 → 0.13s；n=800 → 0.52s；n=1500 → 1.63s；n=3000 → 7.88s（BDD �
 - 重要度**增量重算**（单事件变更下只重算受影响度量）：未开始（当前全量 O(#节点)，已足够快，先测再优化）
 - API / Web 工作台：未开始（30 天工作包序列；先 CLI → API → 再 UI）
 - PostgreSQL 迁移脚本：未开始（一期已备 `store export` 往返；团队版阶段）
-- 结构化 patch 语言与 revert 命令：未开始（当前提案为整份模型，回退＝再提案旧语义）
+- **影响范围分析与 revert：已实现并验证**（`review impact` / `review revert`；revert 从库内自建提案，仍走两步人类批准）
+- 对象级 patch 语言（**前向**修改的编辑指令形式）：未开始（当前前向提案为整份模型）
 - 适航/工具鉴定材料：未开始，本版本不作此声明
 
 ## 已知限制
@@ -84,6 +91,8 @@ n=400 → 0.13s；n=800 → 0.52s；n=1500 → 1.63s；n=3000 → 7.88s（BDD �
 15. `certainty`/`inference_note` 置于规范形式哈希之外（描述性字段），因此不参与去重与完整性判定；其保真依赖候选落盘的 provenance 副本
 16. **关注项只是工作项**：`fmea propose-from-importance` 的四个描述字段永远是 `[UNCONFIRMED]` 占位，组件/功能为 `*-UNASSIGNED`；带标记的行**无法**进入正式表（`FMEA_PLACEHOLDER`）。引擎不撰写 FMEA 内容，也不存在让它自动补全的路径
 17. 关注项生成只对**单一模型当前基线上的 run** 有效：run 已被取代即拒绝；跨模型/跨基线的重要性比较不在本版本定义范围
+18. **revert 只能回到本库持有过的基线**：没有库外的"旧版本回退"；**前向**修改仍需整份模型提案（对象级 patch 语言未实现）；diff 的 `order_only` 标注依赖 canonical-v1 保序这一事实，若未来哈希改为输入序不敏感需同步重审该判定
+19. impact/revert 的批准者身份仍是 `--reviewer` 字符串 + 保留标识判断（权宜实现，同第 10 条）；认证层未接入
 
 ## 与开工提示词「最小交付链」的对照
 
@@ -96,6 +105,7 @@ n=400 → 0.13s；n=800 → 0.52s；n=1500 → 1.63s；n=3000 → 7.88s（BDD �
 | 5. 独立参考、种子、负例、变形验证；无 Medini/A 线/LLM/网络重跑 | ✅（全部本地标准库执行） |
 | 6. FMEA 基础表 + 与基本事件的追溯（B05） | ✅（多对多关联；推断行强制说明且须人工批准；修订即新版本；独立验证 20/20 突变检出） |
 | 7. 重要度驱动的 FMEA 关注项 | ✅（生成带 `[UNCONFIRMED]` 标记的**工作项**；幂等、覆盖跳过、精确过滤；带标记的行无法入表） |
+| 8. 影响范围分析 + 一等公民 revert | ✅（`review impact` diff 两侧取自库内行；`review revert` 从基线表自建提案仍走两步人类批准；stale 双向重派生） |
 
 首 72 小时完成定义（无 UI）：读取 JSON、校验 AND/OR 图、独立计算概率、结构化输出、最小范围报告、测试通过、重复事件例题通过、未知门拒绝 —— **全部满足**。
 

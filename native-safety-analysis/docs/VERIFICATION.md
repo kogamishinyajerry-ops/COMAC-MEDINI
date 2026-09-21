@@ -14,11 +14,13 @@
 | 小模型穷举 | ✅ 已执行 | verification/reference_fta.py（独立真值表 oracle）；reference_importance.py（独立共因子 oracle） |
 | 随机/变形测试 | ✅ 已执行 | 210+60 随机模型交叉（结构）；120+40（rate 转换）；120（重要度，4072 项精确对照）；8 类变形不变量 |
 | **支持集双路判定** | ✅ 已执行 | 生产：图上"该层有节点"；参考：真值表仅差一位的行配对。274/509 事件命中"不在支持集" |
-| **存储无浮点审计** | ✅ 已执行 | 声明类型审计 + SQLite `typeof()` 逐值扫描（4501 值，零 REAL）；`store verify` 同法自检 |
+| **存储无浮点审计** | ✅ 已执行 | 声明类型审计 + SQLite `typeof()` 逐值扫描（4615 值，零 REAL）；`store verify` 同法自检 |
 | **存储数值重推导** | ✅ 已执行 | verification/run_store_verification.py：raw sqlite3 读回，用 2ⁿ oracle 重算概率/割集/七项重要度，**精确相等无容差**（1362 项） |
-| **基线与 stale 独立重算** | ✅ 已执行 | 规范形式→SHA-256 独立重实现（53 份基线）；stale 由 `current_baseline_hash` 重算比对 |
-| **存储状态机属性** | ✅ 已执行 | 幂等/冲突/原子性/乐观并发/评审状态机/Agent 无批准权，7 类拒绝码实测触发 |
-| **验证自身有效性（突变测试）** | ✅ 已执行 | 9 种篡改（改数值/删行/改基线/翻 stale/加浮点列/存 REAL）**全部被检出** |
+| **基线与 stale 独立重算** | ✅ 已执行 | 规范形式→SHA-256 独立重实现（55 份基线）；stale 由 `current_baseline_hash` 重算比对 |
+| **存储状态机属性** | ✅ 已执行 | 幂等/冲突/原子性/乐观并发/评审状态机/Agent 无批准权/**revert 守卫与双向 stale 重派生**，9 类拒绝码实测触发 |
+| **验证自身有效性（突变测试）** | ✅ 已执行 | 10 种篡改（改数值/删行/改基线/翻 stale/加浮点列/存 REAL/**改指 applied review 的锚定基线**）**全部被检出** |
+| **影响范围分析（impact）** | ✅ 已执行 | 提案↔当前基线的结构化 diff **两侧都从库内行读出**（不依赖模型文件）；词法噪音在 diff 前消失；门输入仅重排被标 `order_only` |
+| **一等公民 revert** | ✅ 已执行 | 提案**从基线表自建**（目标必须是本库持有过的基线且仍能自重哈希）；仍走两步人类批准；基线行逐字节不变；revert 后 stale **双向**翻转且 verify 干净 |
 | **FMEA 行独立重哈希** | ✅ 已执行 | verification/run_fmea_verification.py：15 当前行 + 2 被取代行由**原始列**独立重建 `fmea-canonical-v1` 规范形式，须等于入库 `canonical_json` 且重哈希等于 `content_hash` |
 | **FMEA 来源与确认** | ✅ 已执行 | 5 条推断行逐条验证 `inference_note` 非空；批准人不得是机器标识；每行必须可回溯到一份同内容哈希的 `applied` 候选 |
 | **FMEA 修订不可变** | ✅ 已执行 | 2 条被取代行的内容字节不变，仅 `superseded`/`superseded_by_version` 变化；后继版本必存在且更大；同名至多一个当前版本 |
@@ -36,7 +38,7 @@
 
 ```text
 $ python -m pytest tests/ -q                     # venv Python 3.13.12 + pytest 9.1.1
-226 passed in ~37s    （含 test_fmea.py 85 项）
+250 passed in ~51s    （含 test_fmea.py 85 项 + test_change_mgmt.py 24 项）
 
 $ python verification/run_cross_check.py         # 结构：标准库 Python 3.13.12
 cross-check: 210/210 passed
@@ -63,7 +65,7 @@ importance cross-check: 120/120 models passed
 
 $ python verification/run_store_verification.py  # 存储：2^n oracle 重新推导库内数值
 mutation check (the checks above must be able to fail)
-  caught   9 / 9 tamperings
+  caught   10 / 10 tamperings
 store verification
   population            : 14 fixed + 8 rate-derived runs
   runs re-derived       : 52
@@ -71,12 +73,14 @@ store verification
   importance values     : 1362 (exact, no tolerance)
   undefined measures    : 52
   exact rational texts  : 166 stored as n/d, 1196 as decimals
-  baselines re-hashed   : 53 (canonical form -> SHA-256, recomputed independently)
-  storage values scanned: 4501 (SQLite typeof — zero REAL expected)
+  baselines re-hashed   : 55 (canonical form -> SHA-256, recomputed independently)
+  storage values scanned: 4615 (SQLite typeof — zero REAL expected)
   superseded runs       : 7 (re-derived like any other run)
   idempotent no-ops     : 1
-  refusals triggered    : APPROVAL_AUTHORITYx1, BASELINE_CONFLICTx4, BASELINE_NOT_CURRENTx1,
-                          REVIEW_NOT_FOUNDx2, REVIEW_STATEx3, RUN_ID_CONFLICTx1,
+  impact reports        : 1 (proposal diffed against the current baseline)
+  reverts applied       : 1 (stale re-derived in BOTH directions)
+  refusals triggered    : APPROVAL_AUTHORITYx2, BASELINE_CONFLICTx4, BASELINE_NOT_CURRENTx1,
+                          REVERT_TARGETx2, REVIEW_NOT_FOUNDx2, REVIEW_STATEx3, RUN_ID_CONFLICTx1,
                           STORE_SCHEMA_MISMATCHx1
   population problems   : 0
 store verification: PASSED
@@ -111,6 +115,18 @@ $ python run.py store  show   store.sqlite nope               → RUN_NOT_FOUND;
 $ python run.py review propose … --reviewer agent             → 记 proposed；基线不动
 $ python run.py review decide  … --approve --reviewer agent   → APPROVAL_AUTHORITY;    exit 2
 $ python run.py review apply   … --reviewer JerryKogami       → applied；旧 run 标 stale
+
+$ python run.py review impact  <db> REV-1                 → 结构化 diff（两侧均取自库内行）
+$ python run.py review revert  <db> --model-id M --target-baseline-hash H --review-id RV-1
+                                                              → 从基线表自建提案；基线不动
+$ python run.py review revert  <db> … --target-baseline-hash <当前基线>
+                                                              → REVERT_TARGET;       exit 2
+$ python run.py review revert  <db> … --target-baseline-hash <本库从未持有>
+                                                              → REVERT_TARGET;       exit 2
+$ python run.py review decide  <db> RV-1 --approve --reviewer agent
+                                                              → APPROVAL_AUTHORITY;  exit 2
+$ python run.py review apply   <db> RV-1 --reviewer JerryKogami → 旧基线恢复；
+                                                              回位 run 的 stale 清除、新 run 落 stale；verify 干净
 
 $ python run.py fmea propose   … --source inference --inference-note "…" --reviewer agent
                                                               → 记 draft；正式表仍为空
@@ -386,7 +402,21 @@ rate 转换另有独立不变量（tests/test_rate_model.py）：λ 单调、t �
 30. 批准后基线被移动 → `apply` 以 `BASELINE_CONFLICT` 拒绝该过期批准
 31. 提案的规范形式被旁路修改 → `apply` 以 `INTEGRITY` 拒绝（重新哈希比对）
 32. 恢复出的副本与原库 `dump()` 逐行相同，且仍会拒绝冲突的 `run_id`
-33. `store verify` 能检出：改数值 / 删行 / 改割集 / 翻 stale / 改基线规范形式 / 增加 REAL 列 / 破坏多重线性恒等式
+33. `store verify` 能检出：改数值 / 删行 / 改割集 / 翻 stale / 改基线规范形式 / 增加 REAL 列 / 破坏多重线性恒等式 / **改指 applied review 的锚定基线**
+
+**变更管理下一层不变量（tests/test_change_mgmt.py，24 项）：**
+
+34. 规范形式 diff 是**纯函数且全 JSON**：输入输出皆可序列化、可入库、可对照
+35. **词法噪音在 diff 之前消失**："0.10" 与 "0.1" 规范形式相同 → diff 为空且 `semantically_equal=true`
+36. 门输入**仅重排**被报告为 changed 且标 `order_only=true`（哈希确实变，但审阅者需要知道这是布尔等价编辑）
+37. `review impact` 的**两侧都从库内行读出**（提案规范形式 + 当前基线规范形式），不依赖任何模型文件——分析不可能与盘上实情漂移
+38. impact 同时报告 `baseline_still_current`：提案期望的基线被移走后，apply 会以 `BASELINE_CONFLICT` 拒绝（实测）
+39. revert 提案**从基线表自建**：目标必须是**本模型在本库持有过**的基线（未知/他模型 → `REVERT_TARGET`）
+40. revert 目标的存储规范形式**重新哈希必须等于目标哈希**（被旁路篡改 → `INTEGRITY` 拒绝，实测）
+41. revert 是普通提案：agent 不得 decide/apply；**已应用后 apply 第二次** → `REVIEW_STATE`；**再次往返**（revert 的 revert）需要全新提案与全新期望
+42. **基线行永不改写**：revert 前后对两条基线行做逐字节比对（revert 只重指 `current_baseline_hash`）
+43. **stale 双向翻转**：revert 后，回到当前基线的旧 run `stale=0` 且 `stale_reason=NULL`，落下的新 run `stale=1`——旧实现"只升不降"会让旧 run 永远卡 stale（本轮修复的真实缺陷）
+44. 被拒的 revert（`--reject`）不动基线；`verify()` 全程干净；dump→restore 往返后 revert 仍可决定与应用
 
 ## 独立运行验证（无 Medini、无 A 线、无 LLM、无网络）
 
@@ -409,4 +439,4 @@ rate 转换另有独立不变量（tests/test_rate_model.py）：λ 单调、t �
 - **FMEA 表口径确认**：本版本刻意**不含**严重度/发生度/探测度/RPN，也不产生 FMECA/FMEDA 结论。若工程上需要风险排序，应作为**新增字段与新增语义**并单独验证，而非就地扩展本表
 - **推断行的确认流程**：`source='inference'` 的行必须写 `inference_note` 且须人类批准方可入表，但"谁来确认、确认到什么程度算充分"需安全专家给出规程
 - **悬空关联的处置**：基线移动后失联的关联只报告与计数、不判为损坏。是否需要"重新挂接"或"显式断开"的操作，待确认
-- **变更提案的粒度**：当前提案是一份完整模型（无结构化 patch 语言）。**B05（FMEA/追溯）落地后**该问题仍待定：是否需要对象级 patch 与影响范围分析，转由后续步骤评估
+- **变更提案的粒度**：影响范围分析（`review impact`）与 revert（`review revert`，从库内自建提案）已落地并验证；**前向**修改的提案仍是一份完整模型——对象级 patch 语言是否必要、什么形态，仍待裁决

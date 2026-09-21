@@ -87,6 +87,8 @@ COVERAGE = {
     "refusals": {},
     "idempotent_noops": 0,
     "storage_value_scans": 0,
+    "impact_reports": 0,
+    "reverts_applied": 0,
 }
 
 
@@ -319,6 +321,37 @@ def read_only_verify(db_path: Path, label: str) -> None:
         verify_numbers(db_path)
     except Exception as exc:  # noqa: BLE001 — deliberate
         fail(f"[{label}] re-derivation raised {type(exc).__name__}: {exc}")
+    # Applied reviews must still re-hash to their own proposals: an applied
+    # change is a fact about history, and neither its anchored baseline nor
+    # its recorded proposal may be edited after the fact.
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        known_hashes = {
+            row["baseline_hash"] for row in conn.execute("SELECT baseline_hash FROM baselines")
+        }
+        for row in conn.execute(
+            "SELECT review_id, proposed_hash, applied_baseline_hash, proposed_canonical_json"
+            " FROM reviews WHERE state='applied'"
+        ):
+            tag = f"[{label}] applied review {row['review_id']!r}"
+            if row["applied_baseline_hash"] is None or row["proposed_canonical_json"] is None:
+                fail(f"{tag}: applied but carries no anchored baseline/proposal")
+                continue
+            try:
+                canonical = json.loads(row["proposed_canonical_json"])
+            except json.JSONDecodeError:
+                fail(f"{tag}: proposed canonical form is not JSON")
+                continue
+            recomputed = independent_canonical_hash(canonical)
+            if recomputed != row["proposed_hash"]:
+                fail(f"{tag}: proposal no longer re-hashes to its recorded hash")
+            if recomputed != row["applied_baseline_hash"]:
+                fail(f"{tag}: anchored baseline is not the hash of what was proposed")
+            if row["applied_baseline_hash"] not in known_hashes:
+                fail(f"{tag}: anchored baseline is missing from the baselines table")
+    finally:
+        conn.close()
 
 
 def verification_catches(db_path: Path) -> str:
@@ -517,7 +550,72 @@ def verify_state_machine(tmp: Path) -> Path:
         if Fraction(rows["A"]["top_event_probability"]) != Fraction(11, 250):
             fail("state: the superseded run's stored payload was not preserved")
 
-        # -- the store's own integrity pass
+        # -- impact analysis: the diff of a proposal, read from the store alone.
+        # REV-1 was applied above, so a NEW proposal of the old semantics gives
+        # a live "what would change" diff against the current baseline.
+        forward = repo.propose_review(
+            review_id="REV-IMP", model_id=model_a.model_id,
+            expected_baseline_hash=repo.current_baseline_hash(model_a.model_id),
+            proposed_model=model_a, proposed_by="agent", note="impact probe",
+        )
+        impact = repo.review_impact("REV-IMP")
+        if impact["baseline_still_current"] is not True:
+            fail("state: impact does not see the current baseline")
+        if impact["summary"]["events_changed"] < 1:
+            fail("state: impact of a probability change reports no event change")
+        COVERAGE["impact_reports"] += 1
+
+        # -- revert: a first-class proposal built from the baseline table.
+        # The current baseline is now model_c's; going back to model_a's first
+        # baseline is a real revert with a real diff.
+        current_hash_now = repo.current_baseline_hash(model_a.model_id)
+        if current_hash_now == first.baseline_hash:
+            fail("state: precondition failed - REV-1 did not move the baseline")
+        expect_refusal(
+            "state: revert to the current baseline", "REVERT_TARGET",
+            lambda: repo.propose_revert(
+                review_id="REV-R0", model_id=model_a.model_id,
+                target_baseline_hash=current_hash_now,
+                expected_baseline_hash=current_hash_now,
+                proposed_by="agent",
+            ),
+        )
+        expect_refusal(
+            "state: revert to a baseline the store never held", "REVERT_TARGET",
+            lambda: repo.propose_revert(
+                review_id="REV-R1", model_id=model_a.model_id,
+                target_baseline_hash="f" * 64,
+                expected_baseline_hash=current_hash_now,
+                proposed_by="agent",
+            ),
+        )
+        revert = repo.propose_revert(
+            review_id="REV-R2", model_id=model_a.model_id,
+            target_baseline_hash=first.baseline_hash,
+            expected_baseline_hash=current_hash_now,
+            proposed_by="agent",
+        )
+        if revert["state"] != "proposed":
+            fail("state: a revert was not recorded as a plain proposal")
+        if repo.current_baseline_hash(model_a.model_id) == first.baseline_hash:
+            fail("state: proposing a revert moved the baseline")
+        expect_refusal(
+            "state: agent decides a revert", "APPROVAL_AUTHORITY",
+            lambda: repo.decide_review("REV-R2", approve=True, reviewer="bot"),
+        )
+        repo.decide_review("REV-R2", approve=True, reviewer="JerryKogami")
+        reverted, _ = repo.apply_review("REV-R2", reviewer="JerryKogami")
+        if reverted["applied_baseline_hash"] != first.baseline_hash:
+            fail("state: an applied revert did not restore the old baseline hash")
+        rows = {r["run_id"]: r for r in repo.list_runs()}
+        if rows["A"]["stale"] or not rows["C"]["stale"]:
+            # stale is DERIVED and must flip BOTH ways after a revert
+            fail("state: revert did not re-derive stale in both directions")
+        if rows["A"]["stale_reason"] is not None:
+            fail("state: a run back on the current baseline kept its stale reason")
+        COVERAGE["reverts_applied"] += 1
+
+        # the store's own integrity pass
         problems = repo.verify()
         for problem in problems:
             fail(f"[store.verify] {problem}")
@@ -597,6 +695,9 @@ MUTATIONS: list[tuple[str, object]] = [
      "CREATE TABLE extra_metric(level REAL)"),
     ("a REAL value is stored (BLOB affinity, no coercion)",
      "CREATE TABLE raw_box(v); INSERT INTO raw_box(v) VALUES (0.5)"),
+    ("an applied review's anchored baseline is repointed",
+     "UPDATE reviews SET applied_baseline_hash='eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'"
+     " WHERE state='applied' AND applied_baseline_hash IS NOT NULL"),
 ]
 
 
@@ -695,6 +796,28 @@ def build_population(tmp: Path) -> Path:
                 run_id=f"fixed-{index:02d}-v2", model=model, solution=solution,
                 payload=run_payload(model, solution, f"fixed-{index:02d}-v2"), actor="JerryKogami",
             )
+
+        # One FULL review loop (propose -> decide -> apply) and one applied
+        # REVERT, so the population carries applied reviews whose anchored
+        # baseline must keep re-hashing to its proposal (Part 6 depends on it).
+        raw, previous = raw_by_model["FIXED_11"]
+        revised = json.loads(json.dumps(raw))
+        revised["basic_events"][0]["probability"] = "0.11"
+        model = validate_model(revised)
+        repo.propose_review(
+            review_id="POP-R1", model_id="FIXED_11",
+            expected_baseline_hash=semantic_model_hash(previous),
+            proposed_model=model, proposed_by="agent", note="population review",
+        )
+        repo.decide_review("POP-R1", approve=True, reviewer="JerryKogami")
+        repo.apply_review("POP-R1", reviewer="JerryKogami")
+        repo.propose_revert(
+            review_id="POP-RV1", model_id="FIXED_11",
+            target_baseline_hash=semantic_model_hash(previous),
+            expected_baseline_hash=repo.current_baseline_hash("FIXED_11"), proposed_by="agent",
+        )
+        repo.decide_review("POP-RV1", approve=True, reviewer="JerryKogami")
+        repo.apply_review("POP-RV1", reviewer="JerryKogami")
     return db
 
 
@@ -730,6 +853,10 @@ def main() -> int:
     print(f"  superseded runs       : {COVERAGE['runs_on_superseded_baseline']} "
           f"(re-derived like any other run)")
     print(f"  idempotent no-ops     : {COVERAGE['idempotent_noops']}")
+    print(f"  impact reports        : {COVERAGE['impact_reports']} "
+          f"(proposal diffed against the current baseline)")
+    print(f"  reverts applied       : {COVERAGE['reverts_applied']} "
+          f"(stale re-derived in BOTH directions)")
     print(f"  refusals triggered    : "
           + ", ".join(f"{code}x{n}" for code, n in sorted(COVERAGE["refusals"].items())))
     print(f"  population problems   : {population_problems}")
@@ -745,7 +872,8 @@ def main() -> int:
     nonzero = [
         key for key in ("runs_verified", "events_compared", "importance_values_compared", "baselines_rehashed",
                         "undefined_measures_compared", "rational_text_values",
-                        "runs_on_superseded_baseline", "idempotent_noops")
+                        "runs_on_superseded_baseline", "idempotent_noops",
+                        "impact_reports", "reverts_applied")
         if COVERAGE.get(key, 0) == 0
     ]
     if nonzero:
@@ -753,6 +881,9 @@ def main() -> int:
         return 1
     if len(COVERAGE["refusals"]) < 7:
         print(f"\nVACUOUS: only {len(COVERAGE['refusals'])} distinct refusal codes exercised")
+        return 1
+    if "REVERT_TARGET" not in COVERAGE["refusals"]:
+        print("\nVACUOUS: the revert guards were never exercised")
         return 1
     print("\nstore verification: PASSED")
     return 0
