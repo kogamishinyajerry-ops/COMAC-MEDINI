@@ -9,7 +9,7 @@
       ▼
 integrations/dsh/server.py        ← 只做 MCP 协议包装（统一信封 + 日志落文件）
       ▼
-application/agent_api.py          ← 九个受控操作（白名单 / 基线绑定 / 审批门禁）
+application/agent_api.py          ← 九个受控操作（白名单 / 基线绑定 / 签名审批门禁）
       ▼
 adapters · domain · worker        ← 与 CLI 完全同一实现
       ▼
@@ -30,7 +30,7 @@ medini Analyze 2023 R2（headless CLI 通道）
 | `medini_get_capabilities` | 能力矩阵 + worker 自检 + 受控工程白名单 | 否 |
 | `medini_read_project` | 只读快照：原生结构 / 基线 / ID 映射 / 映射损失 / 原生漂移 | 否 |
 | `medini_prepare_change` | 变更提案：校验 + diff + patch_hash（**不改工程**） | 否 |
-| `medini_apply_change` | 在**工作副本**实施已批准变更（**只认受信任身份审批**） | 否 |
+| `medini_apply_change` | 在**工作副本**实施已批准变更（**只认受信任审批面板的签名凭证**） | 否 |
 | `medini_run_analysis` | 实机分析 + 自动与独立参考对照，返回 `job_id` | **是** |
 | `medini_get_job` | 作业状态 / 阶段记录 / 错误 / 恢复建议 | 否 |
 | `medini_readback` | 回读原生模型与结果并比对模型哈希 | 否 |
@@ -56,10 +56,8 @@ medini_get_capabilities                     # 先看能力与可用 project_id
 medini_read_project(project_id, case)       # 拿 baseline.semantic_hash
   ↓
 medini_prepare_change(..., expected_baseline_hash=<hash>)   # → change_id
-  ↓（审批在受信面板完成，产出 ApprovalRef）
-medini_apply_change(change_id, approval={approver, approved_at,
-                                         credential_fingerprint,
-                                         scope:"change:<change_id>"})
+  ↓（审批在受信面板完成，见下面「怎么拿到审批凭证」）
+medini_apply_change(change_id, approval=<签名凭证 JSON>)
   ↓
 medini_run_analysis(project_id, case, model_hash=<新 semantic_hash>)  # → job_id
   ↓
@@ -69,6 +67,22 @@ medini_reopen_check(project_id, case, publish=True)   # 落盘 .fta + 生成 GUI
   ↓
 medini_export_evidence(job_id)              # verified 作业 → 证据包
 ```
+
+### 怎么拿到审批凭证（**智能体拿不到**）
+
+凭证由受信任审批面板用私钥签发。本机入口是 CLI：
+
+```bash
+medini-automation approve <change_id> --key-file ~/.medini-approval/<工号>.key --out att.json
+# 再把 att.json 的内容作为 approval 传给 medini_apply_change
+```
+
+签名覆盖 `patch_hash` 与 `expected_baseline_hash` —— **批准的是这一次的具体内容**，
+不是一张按 `change_id` 可复用的空头支票。凭证还带有效期（默认 1800s）与一次性
+`nonce`：重复使用 → `APPROVAL_REPLAYED`；内容改了 → 必须重新签。
+
+**重发同一请求是安全的**：`idempotency_key` 相同且载荷相同时返回首次结果并标
+`replayed=true`，不会重复写入；同键配不同载荷 → `IDEMPOTENCY_CONFLICT`。
 
 `run_analysis` 只在契约上算 Q、**不落盘**；要让工作副本里的 `.fta` 与 GUI 图
 跟上新基线，必须走 `medini_reopen_check`。`read_project` 的 `native_drift`
@@ -131,7 +145,14 @@ python integrations/dsh/verify.py --call   # 再真调一次 medini_get_capabili
 | 工具报 `ok=false` 且 `code=PROJECT_NOT_ALLOWED` | `project_id` 不在白名单 | 看 `medini_get_capabilities` 的 `worker_env.projects` |
 | `code=LICENSE_DOWN` | 许可服务未监听 1055 | 双击 `scripts\start-license.bat`（用户态，无需管理员） |
 | `code=BASELINE_MISMATCH` | 基线在提案/批准之后被推进 | 重新 `read_project` 取哈希 → 重新提案 → 重新审批 |
-| `code=NO_APPROVAL` | 未提供受信任身份审批引用 | 审批必须来自受信面板；Agent 自述的批准无效 |
+| `code=TRUST_ROOT_MISSING` | 本机没有信任根（`~/.medini-approval/trust.json`） | fail-closed 是设计：`cli key-init` 生成密钥 → 人工登记公钥 → `cli trust` 复核 |
+| `code=APPROVAL_UNSIGNED` | 凭证没有 `signature`（手写的几个字段不算凭证） | 用 `cli approve --key-file <私钥>` 签发；智能体无法自批，这是有意的 |
+| `code=APPROVAL_SIGNATURE_INVALID` | 凭证被篡改，或签名者不是信任根里的那个身份 | 重新签发，不要手工编辑凭证 JSON |
+| `code=APPROVAL_EXPIRED` | 凭证过期（默认 1800s） | 重新走审批；过期是有意的 —— 批准针对"当下这个基线" |
+| `code=APPROVAL_PATCH_MISMATCH` | 批准绑定的内容摘要与变更单不符 | 内容在批准后被动过：重新提案 + 重新审批 |
+| `code=APPROVAL_REPLAYED` | 同一份凭证用第二次 | 凭证一次性；内容没变也要重新签 |
+| `code=IDEMPOTENCY_CONFLICT` | 同一幂等键被用于不同载荷 | 换内容就要换键（`prepare_change` 会给新键） |
+| `code=WRITER_BUSY` | 有别的写者持有该工程 | 响应里的 `lock_holder` 说明是谁；写作业是秒级的，稍后重试即可 |
 | 工具调用长时间无响应 | medini 冷启动（可达 140s） | 正常；`toolCallTimeoutMs` 已设 600s |
 
 服务端日志：`logs/mcp-server.log`（**不写 stderr**——stdio 传输下 stderr 是

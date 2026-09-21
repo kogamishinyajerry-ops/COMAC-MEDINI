@@ -61,7 +61,7 @@ def block_text(python: pathlib.Path, server: pathlib.Path) -> str:
         "# medini_export_evidence / medini_reopen_check",
         "#",
         "# 全部转发到 application.agent_api（与 CLI 同一实现），server 只做协议包装。",
-        "# 纪律：受控 project_id 白名单、基线哈希绑定、审批门禁（只认受信任身份层）。",
+        "# 纪律：受控 project_id 白名单、基线哈希绑定、签名审批门禁（Ed25519 凭证）。",
         "# 与 D:\\MediniAgent\\mcp 的 serverName=medini 相互独立（工具前缀 mcp__medini-auto__）。",
         "#",
         "# toolCallTimeoutMs 600s：reopen_check 起两个独立 JVM（保存 + 重开），",

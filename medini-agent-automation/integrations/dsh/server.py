@@ -168,8 +168,10 @@ def medini_prepare_change(project_id: str, case: str, ops: list[dict[str, Any]],
     ``medini_read_project`` 拿）；**首次建立基线**传 ``null`` 并给
     ``contract_path`` 指向该案例的契约 JSON。
 
-    返回 ``change_id``。提案进入 ``awaiting_approval``——**本工具不能批准**，
-    批准必须来自受信任身份层。
+    返回 ``change_id``（以及 ``patch_hash``、``idempotency_key``、
+    ``required_permission``）。提案进入 ``awaiting_approval``——**本工具不能批准**，
+    批准必须由受信任审批面板用私钥签发（签名覆盖 patch_hash，所以批准的是这一次的
+    具体内容）。
     """
     return _wrap("medini_prepare_change", API.prepare_change,
                  project_id=project_id, case=case, ops=ops,
@@ -181,20 +183,35 @@ def medini_prepare_change(project_id: str, case: str, ops: list[dict[str, Any]],
 # ═══════════════════════════════════════════════════ 4. 变更实施
 @mcp.tool()
 def medini_apply_change(change_id: str,
-                        approval: dict[str, Any] | None = None) -> dict[str, Any]:
+                        approval: dict[str, Any] | None = None,
+                        idempotency_key: str | None = None) -> dict[str, Any]:
     """在**工作副本**实施已批准的变更（推进基线版本）。
 
-    ``approval`` 必须是受信任身份层签发的审批引用，四个字段缺一不可：
-    ``approver``（审批人工号/姓名）、``approved_at``（ISO8601）、
-    ``credential_fingerprint``（受信会话凭据指纹）、
-    ``scope``（必须正好是 ``change:<change_id>``）。
+    ``approval`` 必须是受信任审批面板**签名**的凭证（Ed25519）。
+    字段：``v`` / ``approver`` / ``approved_at`` / ``expires_at`` / ``scope`` /
+    ``project_id`` / ``patch_hash`` / ``expected_baseline_hash`` /
+    ``permission`` / ``nonce`` / ``credential_fingerprint`` / **``signature``**。
 
-    **智能体自己声明的批准无效**——没有这种参数。基线在批准之后被别人推进过
-    也会被拒（``BASELINE_MISMATCH``），必须重新提案并重新取得批准。
-    只写工作副本与控制面状态，既有工程永不被触碰。
+    其中 ``scope`` 必须正好是 ``change:<change_id>``，且 ``patch_hash`` 与
+    ``expected_baseline_hash`` 必须与变更单一致 —— 签名绑定的是**具体内容**，
+    不是一张按 change_id 可复用的空头支票。
+
+    **智能体自己声明的批准无效**——本工具没有这种参数；**字段齐全但没签名的
+    自述凭证也会被 ``APPROVAL_UNSIGNED`` 拒绝**。凭证还带有效期与一次性 nonce，
+    重复使用会被 ``APPROVAL_REPLAYED`` 拒绝。
+
+    签名怎么来：凭证由审批面板（人机界面）签发，不在智能体的能力范围内。
+    本机的签发入口是 CLI ``approve --key-file <私钥>``。
+
+    ``idempotency_key`` 可省略（默认用变更单里的键）。**重发同一请求是安全的**：
+    同键同载荷 → 返回首次结果并标 ``replayed=true``，不会重复写入。
+
+    基线在批准之后被别人推进过也会被拒（``BASELINE_MISMATCH``），
+    必须重新提案并重新取得批准。只写工作副本与控制面状态，既有工程永不被触碰。
     """
     return _wrap("medini_apply_change", API.apply_change,
-                 change_id=change_id, approval=approval)
+                 change_id=change_id, approval=approval,
+                 idempotency_key=idempotency_key)
 
 
 # ═══════════════════════════════════════════════════ 5. 分析
