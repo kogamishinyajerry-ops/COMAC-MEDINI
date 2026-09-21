@@ -1,0 +1,49 @@
+{
+  "schema_version": "0.2.0",
+  "model_id": "R01_rate_and",
+  "baseline_id": "SYNTH-RATE",
+  "rate_precision_digits": 40,
+  "assumptions": {
+    "basic_events_independent": true,
+    "probability_semantics": "fixed_mission_probability_from_constant_rate",
+    "condition": "Synthetic rate-model example. Mission = 1000 h, non-repairable, constant failure rate. Not an aircraft system assessment."
+  },
+  "basic_events": [
+    {
+      "id": "P1",
+      "label": "Pump 1 loss (rate model)",
+      "source": "synthetic_constant_rate",
+      "failure_rate": {
+        "model": "constant_failure_rate",
+        "lambda": "1e-6",
+        "lambda_unit": "1/h",
+        "mission_time": "1000",
+        "mission_time_unit": "h",
+        "repairable": false,
+        "source": "synthetic_example_only"
+      }
+    },
+    {
+      "id": "V1",
+      "label": "Valve 1 stuck closed (rate model)",
+      "source": "synthetic_constant_rate",
+      "failure_rate": {
+        "model": "constant_failure_rate",
+        "lambda": "2e-6",
+        "lambda_unit": "1/h",
+        "mission_time": "1000",
+        "mission_time_unit": "h",
+        "repairable": false,
+        "source": "synthetic_example_only"
+      }
+    }
+  ],
+  "gates": [
+    {
+      "id": "TOP",
+      "kind": "AND",
+      "inputs": ["P1", "V1"]
+    }
+  ],
+  "top_event": "TOP"
+}

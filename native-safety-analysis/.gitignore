@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Generated run artifacts (evidence bundles are reproducible from the model +
+# engine version; they are not source). Keep the directory itself.
+evidence/
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

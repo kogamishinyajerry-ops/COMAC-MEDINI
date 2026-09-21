@@ -1,0 +1,69 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1.0"
+    },
+    "engine": {
+      "type": "string"
+    },
+    "software_version": {
+      "type": "string"
+    },
+    "adapter_version": {
+      "type": "string"
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "capability_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+          },
+          "status": {
+            "enum": [
+              "verified",
+              "partial",
+              "unsupported",
+              "unverified"
+            ]
+          },
+          "method": {
+            "type": "string"
+          },
+          "restrictions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "evidence_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "capability_id",
+          "status",
+          "method",
+          "restrictions",
+          "evidence_ids"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "engine",
+    "software_version",
+    "adapter_version",
+    "capabilities"
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

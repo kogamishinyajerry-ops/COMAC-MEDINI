@@ -1,0 +1,8 @@
+# Normalize line endings so hashes, diffs and cross-machine work stay stable.
+# This repository is pure text (Python, JSON, Markdown); the engine never
+# depends on CRLF, so force LF everywhere.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.zip binary

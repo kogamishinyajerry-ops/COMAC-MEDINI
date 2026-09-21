@@ -1,0 +1,17 @@
+{
+  "schema_version": "0.1.0",
+  "engine": "medini_adapter",
+  "software_version": "unknown_not_inspected",
+  "adapter_version": "not_implemented",
+  "capabilities": [
+    {
+      "capability_id": "create_static_fta",
+      "status": "unverified",
+      "method": "native_scripting_candidate",
+      "restrictions": [
+        "Requires local API documentation, a licensed installation and actual testing."
+      ],
+      "evidence_ids": []
+    }
+  ]
+}
