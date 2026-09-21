@@ -134,7 +134,7 @@ python run.py fmea propose-from-importance store.sqlite --run <run_id> \
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install pytest    # 联网准备环境执行
-.venv/Scripts/python -m pytest tests/ -q      # 305 项，离线可跑
+.venv/Scripts/python -m pytest tests/ -q      # 314 项，离线可跑
 
 # 交叉验证不需要 pytest（纯标准库）：
 python verification/run_cross_check.py              # 210 模型（结构），离线可跑

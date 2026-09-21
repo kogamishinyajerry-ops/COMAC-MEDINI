@@ -39,7 +39,7 @@
 
 ```text
 $ python -m pytest tests/ -q                     # venv Python 3.13.12 + pytest 9.1.1
-305 passed in ~62s    （含 test_fmea.py 85 项 + test_change_mgmt.py 24 项 + test_patch.py 55 项）
+314 passed in ~60s    （含 test_fmea.py 85 项 + test_change_mgmt.py 24 项 + test_patch.py 55 项 + test_compile_cache.py 9 项）
 
 $ python verification/run_cross_check.py         # 结构：标准库 Python 3.13.12
 cross-check: 210/210 passed
@@ -458,6 +458,13 @@ rate 转换另有独立不变量（tests/test_rate_model.py）：λ 单调、t �
 64. **语义声明不被副作用翻转**：`set_probability_semantics` 是显式操作（与 `set_condition` 同级）；带 rate 事件而不声明、声明而不带，双向守卫都拒绝
 65. **schema 只升不降**：删光 rate 事件后 0.2.0 + rate 语义保持，终检拒绝（降级是语义收窄的显式决定）
 66. 新增 rate 事件精度取模型口径：有 rate 兄弟则沿用其记录精度，否则域默认 40 位
+
+**编译复用不变量（tests/test_compile_cache.py，9 项）：**
+
+67. **缓存命中 == 清缓存后全新求解**：概率、割集族、变量序、节点数、每条重要度记录（含 undefined reasons）逐字段恒等——复用被**证明**而非假设
+68. **结构指纹不含概率**：概率改拼、标签改写、词法噪音（"0.10"）不改变指纹；**门输入重排、增删事件**必须改变指纹（结构变更不得命中）
+69. 概率变更复用缓存的结果与全新求解恒等；连续两次概率变更共享同一条目；缓存**有界**（最新者留）
+70. Q=0 / p=0 等**undefined 情形的 reasons 在复用路径下原样重现**；importance off→on 跨模式共享缓存安全；rate 模型同样复用
 
 ## 独立运行验证（无 Medini、无 A 线、无 LLM、无网络）
 

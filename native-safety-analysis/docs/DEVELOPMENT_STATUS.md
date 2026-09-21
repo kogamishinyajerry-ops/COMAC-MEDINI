@@ -11,12 +11,12 @@
 - `src/native_safety/store/`：**持久化适配层**（`schema.py` 迁移注册表 + 无浮点列审计，**schema v2 八表**；`repository.py` 仓储 + 幂等 run + 乐观并发 + stale 派生 + 评审状态机 + **FMEA 行/关联/候选闭环与追溯** + **关注项占位守卫与覆盖查询** + dump/restore + 自校验 `verify()`；`errors.py` 十五类存储错误码）。单文件 SQLite，只依赖标准库 `sqlite3`，不做校验、不做文件 IO
 - `src/native_safety/cli/`：validate / analyze / capabilities / **store**（init/status/runs/show/baseline/adopt-baseline/important/verify/export）/ **review**（propose/**patch**/**patch-preview**/**impact**/**revert**/list/show/decide/apply）/ **fmea**（rows/candidates/show/propose/**propose-from-importance**/decide/apply/trace），退出码 0/2/3/4/5；rate 模型额外输出 `rate_provenance[]`（每事件含 `interpretation`）、`probability_interpretation` 与强制非 per-flight-hour 警告；**`--importance {auto,on,off}`** 与 `importance_measures[]`（按 FV 降序）/`importance_status`/`importance_conventions`/`importance_exact`，报告含重要度表；`analyze --db` 增加 `store{status,...}` 块（被拒时如实标 refused 且退出码非零，但保留分析结果）
 - `verification/`：独立参考实现（真值表穷举 + Fraction，与生产内核零共享）、210 模型结构交叉对照脚本、**120 模型 rate 转换交叉对照脚本**（独立有理级数 oracle）、**120 模型重要度交叉对照脚本**（独立共因子 oracle + 真值表支持集判定，4072 项精确相等，附覆盖度统计）、**存储验证脚本**（raw sqlite3 读回 + 2ⁿ oracle 重推导 + 独立重哈希 + 9 项突变测试 + 往返测试）、**FMEA 验证脚本**（raw sqlite3 由列级原值独立重建规范形式并重哈希 + 状态机独立复跑 + **20 项突变测试** + 真空度闸门）
-- `tests/`：**305 项测试**（15 种子 + 12 结构拒绝 + 10 rate 拒绝 + 8 变形不变量 + rate 数值/边界不变量 + 22 项重要度 + 53 项存储 + **85 项 FMEA（校验拒绝/顺序不敏感/哈希边界/候选闭环/乐观并发/修订不可变/悬空关联/**重要度关注项**/往返/CLI 全流程）** + **24 项变更管理（纯函数 diff/词法噪音/order_only/impact 从库内读/revert 生命周期/stale 双向翻转/守卫/CLI）** + **55 项 patch（纯函数/按序应用/共享渲染/rate 守卫/收敛性/set_event_rate+add_event(rate) 转换闸门+oracle/语义显式声明/schema 只升不降/22 种非法操作/环检测/CLI）** + 资源上限 + CLI/证据包集成 + 哈希稳定性 + 交叉验证）
+- `tests/`：**314 项测试**（15 种子 + 12 结构拒绝 + 10 rate 拒绝 + 8 变形不变量 + rate 数值/边界不变量 + 22 项重要度 + 53 项存储 + **85 项 FMEA（校验拒绝/顺序不敏感/哈希边界/候选闭环/乐观并发/修订不可变/悬空关联/**重要度关注项**/往返/CLI 全流程）** + **24 项变更管理（纯函数 diff/词法噪音/order_only/impact 从库内读/revert 生命周期/stale 双向翻转/守卫/CLI）** + **55 项 patch（纯函数/按序应用/共享渲染/rate 守卫/收敛性/set_event_rate+add_event(rate) 转换闸门+oracle/语义显式声明/schema 只升不降/22 种非法操作/环检测/CLI）** + 资源上限 + CLI/证据包集成 + 哈希稳定性 + 交叉验证）
 
 ## 实际执行并通过（2026-09-21）
 
 ```text
-python -m pytest tests/ -q                       → 305 passed in ~62s    (venv 3.13.12, pytest 9.1.1)
+python -m pytest tests/ -q                       → 314 passed in ~60s    (venv 3.13.12, pytest 9.1.1)
 python verification/run_cross_check.py           → 210/210 passed       (结构，Fraction 精确相等)
 python verification/run_rate_cross_check.py      → 120/120 passed       (rate，tolerance 1e-30，max diff 3.79e-41)
 python verification/run_importance_cross_check.py→ 120/120 passed       (重要度，4072 项精确相等，无容差)
@@ -61,6 +61,14 @@ python run.py validate <lambda_unit=1/s>          → RATE_UNITS, exit 2
 n=400 → 0.13s；n=800 → 0.52s；n=1500 → 1.63s；n=3000 → 7.88s（BDD 节点=n，割集=n）
 加算重要度：n=200 → 0.058s；n=800 → 1.23s；n=1500 → 5.41s（约为概率计算的 2.6 倍，绝对值与 1500 条记录恒等式校验全通过）
 
+编译复用（B03 收尾：先测再优化的实测落地，`verification/run_incremental_bench.py`）：
+相位分解（链式 OR，i7，venv 3.13）：compile 占总时长 **31–45%**（n=3000：compile 3.38s / table 0.42s / importance 7.05s），
+且**数学上与概率无关**（变量序/图/割集只读结构）。`solve_model` 按结构指纹缓存结构产物
+（BDD + 变量序 + 割集），概率变更命中缓存只付 table+importance：n=1500 实测
+**冷 1.83s → 暖 1.13s（1.62×）**、概率变更暖路 1.46s vs 全新 2.24s（**1.53×**）；
+正确性不依赖缓存——table 与 importance **每次全量重算**，复用由 9 项恒等测试锁定
+（缓存命中结果 == 清缓存后全新求解，逐字段含 undefined reasons）。
+
 存储侧无性能瓶颈：写入为单事务常数条语句；`store verify` 对 22 run / 4501 值在秒级完成。
 
 ## 未执行 / 阻塞
@@ -70,7 +78,7 @@ n=400 → 0.13s；n=800 → 0.52s；n=1500 → 1.63s；n=3000 → 7.88s（BDD �
 - 真实 Medini 对照：不在 B 线范围（A 线职责；对照属联合验收）
 - **FMEA 基础表与追溯：已实现并验证（B05）**；FMECA 风险排序（严重度/发生度/探测度/RPN）**明确不在范围**
 - 重要度→FMEA 关注项的自动生成：**已实现并验证**（`fmea propose-from-importance`）；生成的是**带标记的工作项**，不是内容
-- 重要度**增量重算**（单事件变更下只重算受影响度量）：未开始（当前全量 O(#节点)，已足够快，先测再优化）
+- **编译复用：已实现并验证**（结构指纹缓存，概率变更免重编译 1.5–1.6×；table/importance 仍每次全量重算——数学上不可避免；9 项恒等测试 + 基准脚本入库）
 - API / Web 工作台：未开始（30 天工作包序列；先 CLI → API → 再 UI）
 - PostgreSQL 迁移脚本：未开始（一期已备 `store export` 往返；团队版阶段）
 - **影响范围分析与 revert：已实现并验证**（`review impact` / `review revert`；revert 从库内自建提案，仍走两步人类批准）

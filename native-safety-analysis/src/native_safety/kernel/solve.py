@@ -21,6 +21,16 @@ silently cut.
 K_OF_N compiles via the negation-free threshold recursion
 T(j, c) = (x_j AND T(j+1, c+1)) OR T(j+1, c), correct for arbitrary BDD
 inputs and O(k·n) for plain variables.
+
+Compilation reuse (measured before built — see verification/run_incremental_bench.py):
+the compiled diagram, its variable order and the minimal cut sets depend on
+STRUCTURE ONLY (event ids, gates, top event), never on probabilities, and
+compilation is 31–45% of solve time on pressure models. `solve_model` keeps a
+small process-level cache keyed by a structure fingerprint (structure part of
+the canonical form + node limit); a probability-only change hits the cache and
+pays only table + importance. Correctness does not rest on the cache: every
+hit recomputes the table and importance from scratch on the REUSED diagram,
+and the reuse is verified by identity tests (cached result == fresh result).
 """
 from __future__ import annotations
 
@@ -46,6 +56,42 @@ STATUS_COMPUTED = "computed"
 STATUS_NOT_REQUESTED = "not_requested"
 STATUS_SKIPPED_WIDE = "skipped_model_too_wide"
 
+# Process-level compilation cache. Key: (structure fingerprint, max_nodes).
+# Value: the reusable structure-only artifacts — manager, root, variable
+# order, minimal cut sets. Bounded: the newest entries win, old ones are
+# evicted wholesale (a solver process realistically alternates among a
+# handful of structures).
+_COMPILE_CACHE: dict[tuple, tuple] = {}
+_COMPILE_CACHE_MAX = 8
+
+
+def structure_fingerprint(model: StaticFtaModel) -> tuple:
+    """The structure part of a model: everything compilation depends on.
+
+    Event IDs (in variable-order-relevant identity), gates with their
+    kinds/inputs/k, the top event. Probabilities are DELIBERATELY absent:
+    neither `_variable_order` nor `_compile` nor `_minimal_cut_sets` reads
+    them. Two models with the same fingerprint compile to the same diagram,
+    so a probability-only change can reuse the compilation.
+    """
+    return (
+        tuple(sorted(e.id for e in model.basic_events)),
+        tuple(
+            (g.id, g.kind, tuple(g.inputs), g.k)
+            for g in sorted(model.gates, key=lambda g: g.id)
+        ),
+        model.top_event,
+    )
+
+
+def clear_compile_cache() -> None:
+    """Test hook: reuse must be proven against fresh compiles, not assumed."""
+    _COMPILE_CACHE.clear()
+
+
+def compilation_cache_size() -> int:
+    return len(_COMPILE_CACHE)
+
 
 @dataclass
 class SolveResult:
@@ -68,19 +114,36 @@ def solve_model(
     importance: str = IMPORTANCE_AUTO,
     importance_max_events: int = DEFAULT_IMPORTANCE_MAX_EVENTS,
 ) -> SolveResult:
-    """Compile and solve a validated model. Raises on resource limits."""
+    """Compile and solve a validated model. Raises on resource limits.
+
+    Compilation is cached by structure fingerprint: a probability-only change
+    reuses the diagram and the minimal cut sets (both structure-only) and
+    recomputes the probability table and importance from scratch on the
+    reused diagram. Correctness does not rest on the cache — every result is
+    recomputed; the reuse itself is verified by identity tests.
+    """
     if importance not in IMPORTANCE_MODES:
         raise ValueError(f"unknown importance mode {importance!r}")
     started = time.perf_counter()
-    var_order = _variable_order(model)
-    mgr = BddManager(var_order=var_order, max_nodes=max_nodes)
-    root = _compile(model, mgr)
+
+    fingerprint = (structure_fingerprint(model), max_nodes)
+    cached = _COMPILE_CACHE.get(fingerprint)
+    if cached is None:
+        var_order = _variable_order(model)
+        mgr = BddManager(var_order=var_order, max_nodes=max_nodes)
+        root = _compile(model, mgr)
+        cut_sets, complete = _minimal_cut_sets(root, mgr, max_mcs_paths)
+        if len(_COMPILE_CACHE) >= _COMPILE_CACHE_MAX:
+            _COMPILE_CACHE.clear()
+        _COMPILE_CACHE[fingerprint] = (mgr, root, var_order, cut_sets, complete)
+    else:
+        mgr, root, var_order, cut_sets, complete = cached
 
     # One table serves both the top-event probability and the importance
     # cofactors, so the two can never disagree about the same diagram.
+    # ALWAYS recomputed — it is multilinear in the probabilities.
     table = _probability_table(root, mgr, model.probabilities)
     probability = table[root]
-    cut_sets, complete = _minimal_cut_sets(root, mgr, max_mcs_paths)
 
     records: list[ImportanceRecord] | None = None
     status = STATUS_NOT_REQUESTED

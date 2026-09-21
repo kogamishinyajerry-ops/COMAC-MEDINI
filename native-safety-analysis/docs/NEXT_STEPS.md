@@ -95,8 +95,9 @@
    - 用身份系统替代 `--reviewer` 字符串 + 保留标识判断（见 VERIFICATION.md 待裁决项）
    - 涉及全部闭环命令（review/fmea/patch/revert 的 decide/apply）
 
-3. **重要度增量重算（B03 收尾之二，先测再优化）**
-   - 单事件概率变更下只重算受影响度量（当前为全量 O(#节点)，已足够快）
+3. ~~重要度增量重算（B03 收尾之二）~~ ✅ **编译复用**（先测再优化的实测落地）
+   - 实测（`verification/run_incremental_bench.py`）：compile 占 31–45% 且与概率无关 → `solve_model` 按结构指纹缓存 BDD+变量序+割集；概率变更免重编译（n=1500 提速 1.5–1.6×）
+   - table 与 importance **每次全量重算**（数学上不可避免：节点值对 q 多线性、Q 变则全部比值变）；正确性由 9 项恒等测试锁定（缓存命中 == 清缓存全新求解）
    - ~~按度量排序的"关键事件 Top-N"汇总~~ ✅ `store important --by … --top N`
    - ~~高 FV / 高 RAW 事件驱动 FMEA 关注项~~ ✅ `fmea propose-from-importance`
    - ~~影响范围分析 + 一等公民 revert~~ ✅ `review impact` / `review revert`

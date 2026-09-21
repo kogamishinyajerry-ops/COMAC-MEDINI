@@ -161,7 +161,13 @@ q−ᵢ = Σ_{v: level(v)=i} reach(v)·P(v.low)   +  T(i)
 - `review revert` 从**基线表自建**提案：读目标基线的 `canonical_json` → 重新哈希必须等于目标哈希（防旁路篡改）→ 以普通 `proposed` 提案入库。目标必须是该模型在本库持有过的基线，且不得是当前基线（`REVERT_TARGET`）。此后与任何提案完全同构：具名人类 decide → apply（复用 `_anchor_baseline_locked`，apply 侧的重哈希锚定检查同样生效）。
 - **没有"revert 专用快车道"**：不做 assume-yes、不跳审批、乐观并发不豁免——revert 的 revert 需要全新提案与全新期望哈希。
 
-### 11.6 对象级 patch 语言（`domain/patch.py`）
+### 11.6 编译复用（`kernel/solve.py` 结构指纹缓存）
+
+- **先测再优化**（`verification/run_incremental_bench.py`）：compile 占总时长 31–45%，且变量序/图/割集**只读结构不读概率**——这是复用的数学依据。
+- `solve_model` 以 `(structure_fingerprint, max_nodes)` 为键缓存 BDD 管理器、根节点、变量序与割集；概率变更命中缓存只付 table+importance（实测 1.5–1.6×）。
+- **正确性不依赖缓存**：table 与 importance 每次从零重算（节点值对 q 多线性、Q 变则全部比值变——数学上不可避免）；复用本身由 9 项恒等测试锁定（缓存命中 == 清缓存全新求解，逐字段含 undefined reasons）。
+
+### 11.7 对象级 patch 语言（`domain/patch.py`）
 
 - **patch 是纯函数**：`apply_patch(canonical, ops)` 深拷贝后按序应用十种编辑操作，输入永不改写；终态整体校验（引用/全图无环/K_OF_N/双向语义守卫）后才返回。
 - **校验在规范形式层**（这是设计决定而非偷懒）：canonical 的 `p` 可以是精确 `n/d` 文本（`1/3`），超出模型输入词法——重建模型文件无法合法表达它。因此 patch 结果在其所在层做**实质等价**的检查，不经过文件往返。
@@ -169,11 +175,11 @@ q−ᵢ = Σ_{v: level(v)=i} reach(v)·P(v.low)   +  T(i)
 - **收敛性**：patch 与等价的全模型提案产出**相同 `proposed_hash`**（独立验证锁定）——两条入口不可能各自漂移出不同的规范形式。
 - **守卫**：rate 事件的 p 不可直设（由 λ·t 派生）；`set_event_rate` 编辑既有 rate 事件时**完整重跑转换闸门**（`parse_rate_spec` → `mission_probability` 按已记录精度 → 重写 provenance 并重派生 p；错误码保留底层分类），q 对照独立有理级数 oracle（容差 1e-30）且与模型级 λ/t 变更**收敛同哈希**；被引用对象不可删；跨操作构造的环被终检拒绝；非法 patch 记为 `invalid`。
 
-### 11.7 精确性在存储上的落地
+### 11.8 精确性在存储上的落地
 
 写入时把结果里的 `Fraction` 用同一条渲染规则（§3）转成精确十进制或精确 `n/d` 文本；读回时用 `Fraction(text)` 还原。**往返无损**：`Fraction(store(x)) == x`，由测试逐字段锁定。重要度值按 run + event 存九列精确文本 + 未定义原因 JSON。
 
-### 11.8 迁移与往返
+### 11.9 迁移与往返
 
 `MIGRATIONS: {版本号 → DDL 语句元组}`，启动时按版本号升序补齐并写 `schema_meta`；版本高于引擎（库来自更新的世代）则拒绝打开，不尝试猜测兼容。`dump()` / `restore()` 提供确定性 JSON 往返（表按主键排序），既服务于 PostgreSQL 迁移，也是"备份可恢复"的实测手段。
 
