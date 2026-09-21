@@ -1,11 +1,14 @@
-"""P2 单元测试：application/agent_api 的九个受控操作。
+"""P2/P3 单元测试：application/agent_api 的九个受控操作。
 
 全部 synthetic：真实 ``.fta``（tests/fixtures/abc.fta，medini 落盘产物）+
 临时工程 / 临时状态根；不依赖 medini 进程与许可。
 
 覆盖重点是**拒绝路径**——本层的价值就在「该拒的必须拒，且拒得可解释」：
-白名单、只读工程、基线绑定、审批门禁（scope / 缺字段 / 自述批准）、
-patch_hash 防篡改、证据完整性。
+白名单、只读工程、基线绑定、审批门禁（**签名 / 有效期 / 权限 / 内容绑定 /
+防重放**）、patch_hash 防篡改、幂等、单写者锁、证据完整性。
+
+P3 之后审批凭证必须**签名**：本文件的 `approve()` 用审批面板的私钥真签发，
+不再手写四个字段 —— 那正是 P2 的漏洞（只比 scope 字符串，等于允许 Agent 自批）。
 """
 from __future__ import annotations
 
@@ -16,6 +19,8 @@ from pathlib import Path
 import pytest
 
 from medini_automation.application import agent_api as A
+from medini_automation.domain import approval as AP
+from medini_automation.domain import ed25519 as ED
 from medini_automation.worker.job import Job, JobStore
 
 FIX = Path(__file__).resolve().parents[1] / "fixtures"
@@ -51,9 +56,17 @@ def make_project(tmp_path: Path, name: str = "WC") -> Path:
     return pdir
 
 
+#: 审批面板的私钥（测试固定值 —— 只为复现，不是任何真实身份的凭据）
+APPROVER = "E12345"
+APPROVER_SEED = bytes.fromhex("11" * 32)
+#: 另一个身份：无 model_write 权限（用来测权限不足）
+LOOKER = "R99999"
+LOOKER_SEED = bytes.fromhex("22" * 32)
+
+
 @pytest.fixture()
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """隔离环境：临时工程 + 临时状态根 + 临时 runs。"""
+    """隔离环境：临时工程 + 临时状态根 + 临时信任根。"""
     wc = make_project(tmp_path, "WC")
     ro = make_project(tmp_path, "RO")
     monkeypatch.setattr(A, "PROJECTS", {
@@ -61,10 +74,22 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "RO": A.ProjectEntry("RO", ro, False, "source-project", "test"),
     })
     monkeypatch.setattr(A, "STATE_ROOT", tmp_path / "state")
+    # 信任根放仓库外（测试里就是 tmp）—— 谁签得了批准由这个文件决定
+    home = tmp_path / "approval"
+    home.mkdir()
+    (home / "trust.json").write_text(json.dumps({
+        "max_validity_seconds": 3600,
+        "approvers": [
+            {"identity": APPROVER, "public_key": ED.public_key(APPROVER_SEED).hex(),
+             "permissions": ["model_write", "analysis_run"], "note": "结构组"},
+            {"identity": LOOKER, "public_key": ED.public_key(LOOKER_SEED).hex(),
+             "permissions": ["evidence_publish"], "note": "只看不发"},
+        ]}, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("MEDINI_APPROVAL_HOME", str(home))
     runs = tmp_path / "runs"
     runs.mkdir()
     return {"wc": wc, "ro": ro, "state": tmp_path / "state", "runs": runs,
-            "tmp": tmp_path}
+            "tmp": tmp_path, "approval_home": home}
 
 
 def bootstrap(env, ops=None, case: str = "abc") -> dict:
@@ -76,10 +101,21 @@ def bootstrap(env, ops=None, case: str = "abc") -> dict:
         reason="test")
 
 
-def approve(change_id: str) -> dict:
-    return {"approver": "E12345", "approved_at": "2026-09-21T20:00:00+08:00",
-            "credential_fingerprint": "sha256:deadbeef",
-            "scope": f"change:{change_id}"}
+def approve(change_id: str, *, seed: bytes = APPROVER_SEED,
+            approver: str = APPROVER, **kw) -> dict:
+    """用受信任审批面板的私钥**真签发**一份凭证。
+
+    上下文从变更单本身读 —— 这样测试改的不是"四个字段"，而是"签谁、签什么"。
+    """
+    blob = json.loads(A._change_path(change_id).read_text(encoding="utf-8"))
+    ctx = AP.ApprovalContext(
+        change_id=change_id, project_id=blob["project_id"],
+        patch_hash=blob["patch_hash"],
+        expected_baseline_hash=blob["expected_baseline_hash"],
+        required_permission=blob.get("required_permission", "model_write"))
+    return AP.issue_attestation(
+        seed=seed, approver=approver, context=ctx,
+        credential_fingerprint="sha256:deadbeef", **kw)
 
 
 # ============================================================ get_capabilities
@@ -313,18 +349,41 @@ def test_apply_change_not_found(env):
 def test_apply_without_approval_refused(env):
     r = A.apply_change(bootstrap(env)["change_id"])
     assert r["status"] == "blocked" and r["code"] == "NO_APPROVAL"
-    assert "受信任身份" in r["hint"]
+    assert "受信任" in r["hint"] and "approved=true" in r["hint"]
 
 
-@pytest.mark.parametrize("drop", ["approver", "approved_at",
-                                  "credential_fingerprint", "scope"])
+def test_apply_unsigned_fields_are_not_a_credential(env):
+    """P2 的漏洞回归：手写四个字段（无签名）必须被拒，而不是通过。
+
+    上一版只比对 scope 字符串，等于 Agent 自己拼 JSON 就能自批。
+    """
+    cid = bootstrap(env)["change_id"]
+    hand_written = {"approver": APPROVER, "approved_at": "2026-09-21T20:00:00+08:00",
+                    "credential_fingerprint": "sha256:deadbeef",
+                    "scope": f"change:{cid}"}
+    r = A.apply_change(cid, approval=hand_written)
+    assert r["status"] == "blocked" and r["code"] == "APPROVAL_UNSIGNED"
+    assert "签名" in r["error"]
+
+
+@pytest.mark.parametrize("drop", ["approver", "approved_at", "scope",
+                                  "nonce", "patch_hash", "expires_at"])
 def test_apply_approval_incomplete(env, drop):
     cid = bootstrap(env)["change_id"]
     appr = approve(cid)
     appr[drop] = ""
     r = A.apply_change(cid, approval=appr)
     assert r["code"] == "APPROVAL_INCOMPLETE"
-    assert drop in r["hint"]
+    assert drop in r["error"]
+
+
+def test_apply_blanked_audit_field_breaks_signature(env):
+    """``credential_fingerprint`` 允许为空，但**改它一样验不过** —— 签名覆盖全部字段。"""
+    cid = bootstrap(env)["change_id"]
+    appr = approve(cid)
+    appr["credential_fingerprint"] = ""
+    r = A.apply_change(cid, approval=appr)
+    assert r["code"] == "APPROVAL_SIGNATURE_INVALID"
 
 
 def test_apply_approval_scope_mismatch(env):
@@ -332,8 +391,55 @@ def test_apply_approval_scope_mismatch(env):
     appr = approve(cid)
     appr["scope"] = "change:OTHER"
     r = A.apply_change(cid, approval=appr)
-    assert r["code"] == "APPROVAL_REJECTED"
+    assert r["code"] == "APPROVAL_SCOPE_MISMATCH"
     assert f"change:{cid}" in r["hint"]
+
+
+def test_apply_approval_bound_to_content_not_change_id(env):
+    """批准绑定的是**内容摘要**，不是 change_id。
+
+    把凭证原样拿去批另一个变更（哪怕 scope 相同）→ patch_hash 不匹配。
+    """
+    c1 = bootstrap(env)["change_id"]
+    appr = approve(c1)
+    v = A.read_project("WC", case="abc")["baseline"]["semantic_hash"]
+    c2 = A.prepare_change("WC", "abc", [{"op": "set_probability",
+                                         "args": {"id": "B", "probability": "1/3"}}],
+                          expected_baseline_hash=v)
+    r = A.apply_change(c2["change_id"], approval=appr)
+    assert r["status"] == "blocked"
+    assert r["code"] in ("APPROVAL_SCOPE_MISMATCH", "APPROVAL_PATCH_MISMATCH")
+
+
+def test_apply_approval_perm_denied(env):
+    cid = bootstrap(env)["change_id"]
+    r = A.apply_change(cid, approval=approve(cid, seed=LOOKER_SEED, approver=LOOKER))
+    assert r["code"] == "APPROVAL_PERMISSION_DENIED"
+
+
+def test_apply_approval_expired(env):
+    cid = bootstrap(env)["change_id"]
+    appr = approve(cid, validity_seconds=1)
+    import time as _t
+    _t.sleep(2)
+    r = A.apply_change(cid, approval=appr)
+    assert r["code"] == "APPROVAL_EXPIRED"
+
+
+def test_apply_approval_forged_by_other_key(env):
+    """用别人的私钥签 APPROVER 的名字 → 验签失败。"""
+    cid = bootstrap(env)["change_id"]
+    r = A.apply_change(cid, approval=approve(cid, seed=LOOKER_SEED))
+    assert r["code"] == "APPROVAL_SIGNATURE_INVALID"
+
+
+def test_apply_fail_closed_when_trust_root_missing(env, monkeypatch):
+    """信任根不可用 → 拒绝一切审批，而不是"没配置就放行"。"""
+    cid = bootstrap(env)["change_id"]
+    appr = approve(cid)
+    monkeypatch.setenv("MEDINI_APPROVAL_HOME", str(env["tmp"] / "nope"))
+    r = A.apply_change(cid, approval=appr)
+    assert r["status"] == "blocked" and r["code"] == "TRUST_ROOT_MISSING"
 
 
 def test_apply_happy_path_bumps_baseline(env):
@@ -352,11 +458,138 @@ def test_apply_happy_path_bumps_baseline(env):
     assert next(e for e in cur["events"] if e["id"] == "A")["probability"] == "1/4"
 
 
-def test_apply_twice_refused(env):
+def test_apply_replay_same_key_returns_first_result(env):
+    """同一幂等键 + 同一载荷 → 重放首次结果，**不再写一遍**（规划 L114）。
+
+    重放不是错误：调用方在重试，正确反应是把第一次的结果原样还给它。
+    """
+    cid = bootstrap(env)["change_id"]
+    first = A.apply_change(cid, approval=approve(cid))
+    assert first["status"] == "ok" and first["replayed"] is False
+    v_after_first = A.read_project("WC", case="abc")["baseline"]["version"]
+
+    replay = A.apply_change(cid, approval=approve(cid))
+    assert replay["status"] == "ok" and replay["replayed"] is True
+    assert replay["baseline"]["version"] == first["baseline"]["version"]
+    assert A.read_project("WC", case="abc")["baseline"]["version"] == v_after_first
+
+
+def test_apply_conflicting_payload_same_key_refused(env):
+    """同一幂等键配不同载荷 → 拒绝（这是"用错键"，不是重放）。"""
+    cid = bootstrap(env)["change_id"]
+    A.apply_change(cid, approval=approve(cid))
+    p = A._change_path(cid)
+    blob = json.loads(p.read_text(encoding="utf-8"))
+    blob["patch_hash"] = "0" * 64          # 伪造一个新载荷
+    p.write_text(json.dumps(blob, ensure_ascii=False), encoding="utf-8")
+    r = A.apply_change(cid, approval=approve(cid))
+    assert r["status"] == "blocked" and r["code"] == "IDEMPOTENCY_CONFLICT"
+
+
+def test_apply_second_call_with_other_key_refused(env):
+    """换一个幂等键再提交同一变更 → 不走重放，按状态拒绝。"""
     cid = bootstrap(env)["change_id"]
     assert A.apply_change(cid, approval=approve(cid))["status"] == "ok"
-    r = A.apply_change(cid, approval=approve(cid))
+    r = A.apply_change(cid, approval=approve(cid),
+                       idempotency_key="idem-other")
     assert r["code"] == "CHANGE_STATE"
+
+
+def test_approval_nonce_blocks_replayed_credential(env):
+    """凭证一次性：把变更单回滚成 awaiting_approval 再重放同一份批准 → 拒。
+
+    这是 nonce 存在的真正理由 —— 状态检查挡不住"有人把变更单改回去"。
+    """
+    cid = bootstrap(env)["change_id"]
+    original = A._change_path(cid).read_text(encoding="utf-8")
+    appr = approve(cid)
+    assert A.apply_change(cid, approval=appr)["status"] == "ok"
+
+    A._change_path(cid).write_text(original, encoding="utf-8")   # 回滚变更单
+    r = A.apply_change(cid, approval=appr, idempotency_key="idem-replay")
+    assert r["status"] == "blocked" and r["code"] == "APPROVAL_REPLAYED"
+    assert "一次性" in r["hint"]
+
+
+def test_idempotent_replay_still_verifies_signature(env):
+    """端到端实测抓到的漏洞回归：篡改凭证不得从幂等重放路径拿到 ok。
+
+    首次执行的完整校验链是过了的；重放不再查有效期/nonce（否则"重试"会因为
+    凭证过期而失败，与"同一幂等键返回既有作业"冲突），但**必须验签** ——
+    否则一份被篡改的凭证会得到 ok，给调用方「这份凭证有效」的错误信号。
+    """
+    cid = bootstrap(env)["change_id"]
+    assert A.apply_change(cid, approval=approve(cid))["status"] == "ok"
+
+    tampered = approve(cid)
+    tampered["patch_hash"] = "0" + tampered["patch_hash"][1:]
+    r = A.apply_change(cid, approval=tampered)
+    assert r["status"] == "blocked" and r["code"] == "APPROVAL_SIGNATURE_INVALID"
+
+    r2 = A.apply_change(cid, approval=approve(cid))
+    assert r2["status"] == "ok" and r2["replayed"] is True
+    assert r2["approval_reverified"] is True
+
+    # 不带凭证：纯查询"那笔完成了没有"，合法用法
+    r3 = A.apply_change(cid)
+    assert r3["status"] == "ok" and r3["replayed"] is True
+    assert r3["approval_reverified"] is False
+    assert r3["baseline"]["version"] == 2
+
+
+def test_apply_failure_writes_recovery_record(env, monkeypatch):
+    """落盘中断必须留现场（规划 L80「执行日志、恢复记录」）。
+
+    不留现场的话，"上次到底写到哪一步"只能靠猜。
+    """
+    cid = bootstrap(env)["change_id"]
+
+    def boom(*a, **k):
+        raise OSError("disk full (simulated)")
+
+    monkeypatch.setattr(A, "_store_baseline", boom)
+    with pytest.raises(OSError):
+        A.apply_change(cid, approval=approve(cid))
+
+    rec = A.recovery_log("WC")
+    assert len(rec) == 1
+    assert rec[0]["change_id"] == cid
+    assert rec[0]["stage"] == "write_baseline"
+    assert rec[0]["state"] == "recovery_required"
+    assert rec[0]["nonce_consumed"] is True
+
+    # read_project 把它暴露出来，并提示先核对再重新提案
+    rp = A.read_project("WC", case="abc")
+    assert len(rp["pending_recovery"]) == 1
+    assert "恢复记录" in rp["next_action"]
+
+    # 人工核对后可清除
+    assert A.clear_recovery("WC", cid) == 1
+    assert A.read_project("WC", case="abc")["pending_recovery"] == []
+    assert A.clear_recovery("WC", "nonexistent") == 0
+
+
+def test_idempotency_records_are_auditable(env):
+    cid = bootstrap(env)["change_id"]
+    A.apply_change(cid, approval=approve(cid))
+    rows = A.idempotency_record("WC", "abc")
+    assert len(rows) == 1
+    assert rows[0]["key"] == f"auto-{A.read_project('WC', case='abc')['baseline']['patch_hash'][:16]}"
+    assert rows[0]["actor"] == APPROVER
+    assert "result" not in rows[0]        # 审计视图不复制结果载荷
+
+
+def test_apply_blocked_when_writer_lock_held(env):
+    """单写者：锁被别的写者持有时报 WRITER_BUSY 并回持有者信息。"""
+    from medini_automation.application.writer_lock import writer_lock
+    cid = bootstrap(env)["change_id"]
+    appr = approve(cid)
+    with writer_lock("WC/abc", root=A.STATE_ROOT, actor="other-engineer"):
+        r = A.apply_change(cid, approval=appr)
+    assert r["status"] == "blocked" and r["code"] == "WRITER_BUSY"
+    assert r["lock_holder"]["actor"] == "other-engineer"
+    # 锁释放后可正常实施
+    assert A.apply_change(cid, approval=approve(cid))["status"] == "ok"
 
 
 def test_apply_detects_tampered_change_file(env):

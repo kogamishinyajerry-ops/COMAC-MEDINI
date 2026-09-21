@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -332,21 +334,27 @@ def cmd_apply_change(args: argparse.Namespace) -> int:
     """实施已批准变更。
 
     审批只接受 JSON（或 JSON 文件），**不提供** --approver/--fingerprint 这类
-    便利开关——那会让「Agent 自批」变得太容易。审批引用必须来自受信任身份层。
+    便利开关——那会让「Agent 自批」变得太容易。审批必须来自受信任审批面板的签名。
+
+    省略审批参数是**合法**的：幂等命中时（重发同一请求）会直接返回首次结果。
+    这是一个真实的用法——"上次那笔到底写没写进去？"用同一幂等键问一次即可。
     """
     from ..application.agent_api import apply_change
-    try:
-        approval = _load_json_arg(args.approval, args.approval_file, "approval")
-    except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:
-        print(json.dumps({"status": "error", "code": "BAD_APPROVAL_ARG",
-                          "error": str(e)}, ensure_ascii=False), file=sys.stderr)
-        return 2
-    if not isinstance(approval, dict):
-        print(json.dumps({"status": "error", "code": "BAD_APPROVAL_ARG",
-                          "error": "--approval 必须是 JSON 对象"},
-                         ensure_ascii=False), file=sys.stderr)
-        return 2
-    res = apply_change(args.change_id, approval=approval)
+    approval = None
+    if args.approval or args.approval_file:
+        try:
+            approval = _load_json_arg(args.approval, args.approval_file, "approval")
+        except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:
+            print(json.dumps({"status": "error", "code": "BAD_APPROVAL_ARG",
+                              "error": str(e)}, ensure_ascii=False), file=sys.stderr)
+            return 2
+        if not isinstance(approval, dict):
+            print(json.dumps({"status": "error", "code": "BAD_APPROVAL_ARG",
+                              "error": "--approval 必须是 JSON 对象"},
+                             ensure_ascii=False), file=sys.stderr)
+            return 2
+    res = apply_change(args.change_id, approval=approval,
+                       idempotency_key=args.idempotency_key)
     print(json.dumps(res, ensure_ascii=False, indent=2))
     return _exit_for(res)
 
@@ -356,6 +364,153 @@ def cmd_export_evidence(args: argparse.Namespace) -> int:
     res = export_evidence(args.job_id, out_root=Path(args.out) if args.out else None)
     print(json.dumps(res, ensure_ascii=False, indent=2))
     return _exit_for(res)
+
+
+# ============================================== P3 审批面板（受信任侧）
+def cmd_key_init(args: argparse.Namespace) -> int:
+    """生成审批面板的 Ed25519 密钥对。
+
+    私钥落在**仓库外**（默认 ``~/.medini-approval``），公钥**不自动写进信任根**
+    —— 登记授权人必须由人工完成。理由：如果本命令顺手把公钥也登记了，那么能跑
+    CLI 的 Agent 就能一键把自己变成合法审批人，"服务端校验授权人"立刻归零。
+    """
+    from ..domain import ed25519 as ED
+    from ..domain.approval import approval_home, trust_path
+
+    home = Path(args.home) if args.home else approval_home()
+    home.mkdir(parents=True, exist_ok=True)
+    key = home / f"{args.identity}.key"
+    if key.exists() and not args.force:
+        print(json.dumps(
+            {"status": "error", "code": "KEY_EXISTS", "error": f"{key} 已存在",
+             "hint": "换 --identity，或加 --force 覆盖（会作废该身份已签发的批准）"},
+            ensure_ascii=False), file=sys.stderr)
+        return 2
+
+    seed = secrets.token_bytes(32)
+    fd = os.open(key, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (seed.hex() + "\n").encode("ascii"))
+    finally:
+        os.close(fd)
+    pub = ED.public_key(seed).hex()
+    perms = args.permission or ["model_write"]
+    tp = trust_path()
+    print(json.dumps({
+        "status": "ok", "identity": args.identity,
+        "key_file": str(key), "public_key": pub,
+        "trust_root": str(tp), "trust_root_exists": tp.exists(),
+        "permissions": perms,
+        "next_action": (
+            f"**人工**把下面这行填进 {tp} 的 approvers 数组（本命令不会代劳）："
+            + json.dumps({"identity": args.identity, "public_key": pub,
+                          "permissions": perms}, ensure_ascii=False)),
+        "warning": (
+            "私钥不加密，保护强度等于所在目录的访问控制。默认放仓库外，"
+            "正是为了让 Agent 无从自签 —— 别把它提交进版本库或复制到工作目录。"),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_approve(args: argparse.Namespace) -> int:
+    """用审批面板的私钥签发一份审批凭证（这是"受信任人机界面"侧的动作）。"""
+    from ..application.agent_api import _change_path
+    from ..domain.approval import PERMISSIONS, ApprovalContext, issue_attestation
+
+    keyf = Path(args.key_file)
+    if not keyf.exists():
+        print(json.dumps(
+            {"status": "error", "code": "KEY_NOT_FOUND",
+             "error": f"私钥文件不存在: {keyf}",
+             "hint": "先 cli key-init 生成，或 --key-file 指向已有私钥"},
+            ensure_ascii=False), file=sys.stderr)
+        return 2
+    try:
+        seed = bytes.fromhex(keyf.read_text(encoding="utf-8").strip())
+        if len(seed) != 32:
+            raise ValueError(f"seed 长度 {len(seed)} != 32")
+    except (ValueError, OSError) as exc:
+        print(json.dumps(
+            {"status": "error", "code": "BAD_KEY",
+             "error": f"{keyf} 不是合法的 Ed25519 seed（32 字节 hex）: {exc}"},
+            ensure_ascii=False), file=sys.stderr)
+        return 2
+
+    cpath = _change_path(args.change_id)
+    if not cpath.exists():
+        print(json.dumps(
+            {"status": "error", "code": "CHANGE_NOT_FOUND",
+             "error": f"变更单不存在: {cpath}",
+             "hint": "change_id 由 cli prepare-change 返回"},
+            ensure_ascii=False), file=sys.stderr)
+        return 2
+    blob = json.loads(cpath.read_text(encoding="utf-8"))
+
+    approver = args.approver or keyf.stem
+    if args.permission and args.permission not in PERMISSIONS:
+        print(json.dumps(
+            {"status": "error", "code": "BAD_PERMISSION",
+             "error": f"未知权限 {args.permission!r}",
+             "hint": f"合法值 {list(PERMISSIONS)}"}, ensure_ascii=False),
+            file=sys.stderr)
+        return 2
+
+    ctx = ApprovalContext(
+        change_id=args.change_id, project_id=blob["project_id"],
+        patch_hash=blob["patch_hash"],
+        expected_baseline_hash=blob["expected_baseline_hash"],
+        required_permission=blob.get("required_permission", "model_write"))
+    att = issue_attestation(
+        seed=seed, approver=approver, context=ctx,
+        permission=args.permission, validity_seconds=args.validity,
+        credential_fingerprint=args.credential_fingerprint or "")
+
+    text = json.dumps(att, ensure_ascii=False, indent=2)
+    if args.out:
+        outp = Path(args.out)
+        outp.parent.mkdir(parents=True, exist_ok=True)
+        outp.write_text(text + "\n", encoding="utf-8")
+        print(json.dumps({
+            "status": "ok", "written": str(outp.resolve()),
+            "change_id": args.change_id, "approver": approver,
+            "scope": att["scope"], "permission": att["permission"],
+            "expires_at": att["expires_at"], "nonce": att["nonce"],
+            "patch_hash": att["patch_hash"][:16] + "…",
+            "next_action": f"cli apply-change {args.change_id} "
+                           f"--approval-file {outp}",
+        }, ensure_ascii=False, indent=2))
+    else:
+        print(text)
+    return 0
+
+
+def cmd_trust(args: argparse.Namespace) -> int:
+    """显示信任根状态 —— 尤其是"为什么所有审批都被拒"。"""
+    from ..domain import ed25519 as ED
+    from ..domain.approval import load_trust_root, trust_path
+
+    tp = Path(args.home) / "trust.json" if args.home else trust_path()
+    root = load_trust_root(tp)
+    out: dict[str, object] = {
+        "path": str(tp), "exists": tp.exists(), "source": root.source,
+        "max_validity_seconds": root.max_validity_seconds,
+        "ed25519_selfcheck": ED.ed25519_available(),
+        "approvers": [
+            {"identity": e.identity, "public_key": e.public_key,
+             "permissions": list(e.permissions), "note": e.note}
+            for e in sorted(root.entries.values(), key=lambda x: x.identity)],
+    }
+    if root.entries:
+        out["status"] = "ok"
+        out["behaviour"] = "审批按签名凭证校验：授权人 / 权限 / 范围 / 有效期 / 一次性"
+    else:
+        out["status"] = "blocked"
+        out["code"] = "TRUST_ROOT_MISSING"
+        out["behaviour"] = "fail-closed：当前一切 apply_change 都会被拒"
+        out["hint"] = ("先 cli key-init --identity <姓名> 生成密钥，"
+                       "再由人工把公钥登记进 trust.json（见其输出）")
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return 0 if root.entries else 1
 
 
 # ------------------------------------------------------------------- main
@@ -453,10 +608,12 @@ def build_parser() -> argparse.ArgumentParser:
     pc.set_defaults(func=cmd_prepare_change)
 
     ac = sub.add_parser("apply-change",
-                        help="P2 在副本实施已批准变更（只认受信任身份审批）")
+                        help="P3 在副本实施已批准变更（只认受信任审批面板的签名凭证）")
     ac.add_argument("change_id")
-    ac.add_argument("--approval", default=None, help="审批引用 JSON")
-    ac.add_argument("--approval-file", default=None, help="审批引用 JSON 文件")
+    ac.add_argument("--approval", default=None, help="审批凭证 JSON")
+    ac.add_argument("--approval-file", default=None, help="审批凭证 JSON 文件")
+    ac.add_argument("--idempotency-key", default=None,
+                    help="幂等键；默认用变更单里的键（同键同载荷→返回既有结果）")
     ac.set_defaults(func=cmd_apply_change)
 
     ee = sub.add_parser("export-evidence",
@@ -464,6 +621,34 @@ def build_parser() -> argparse.ArgumentParser:
     ee.add_argument("job_id")
     ee.add_argument("--out", default="runs")
     ee.set_defaults(func=cmd_export_evidence)
+
+    ki = sub.add_parser("key-init",
+                        help="P3 生成审批面板 Ed25519 密钥对（私钥落仓库外）")
+    ki.add_argument("--identity", required=True, help="授权人标识（工号/姓名）")
+    ki.add_argument("--home", default=None,
+                    help="密钥目录；默认 $MEDINI_APPROVAL_HOME 或 ~/.medini-approval")
+    ki.add_argument("--permission", action="append", default=None,
+                    help="角色权限，可重复；默认 model_write")
+    ki.add_argument("--force", action="store_true", help="覆盖已存在的私钥")
+    ki.set_defaults(func=cmd_key_init)
+
+    apv = sub.add_parser("approve",
+                         help="P3 用私钥签发审批凭证（受信任审批面板侧动作）")
+    apv.add_argument("change_id")
+    apv.add_argument("--key-file", required=True, help="Ed25519 seed 文件（hex）")
+    apv.add_argument("--approver", default=None,
+                     help="授权人标识；默认取私钥文件名")
+    apv.add_argument("--validity", type=int, default=1800,
+                     help="有效期秒数，默认 1800；上限由信任根 max_validity_seconds 定")
+    apv.add_argument("--permission", default=None)
+    apv.add_argument("--credential-fingerprint", default="")
+    apv.add_argument("--out", default=None, help="凭证输出文件；省略则打 stdout")
+    apv.set_defaults(func=cmd_approve)
+
+    tr = sub.add_parser("trust",
+                        help="P3 显示信任根状态（授权人 / 权限 / 上限）")
+    tr.add_argument("--home", default=None)
+    tr.set_defaults(func=cmd_trust)
     return ap
 
 

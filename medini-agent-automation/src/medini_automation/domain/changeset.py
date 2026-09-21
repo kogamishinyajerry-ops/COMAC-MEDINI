@@ -32,11 +32,42 @@ class ChangeOp:
 
 @dataclass
 class ApprovalRef:
-    """审批引用——只承认受信任会话/身份层签发，含审批人、时间、凭据指纹。"""
+    """审批引用——只承认受信任会话/身份层签发，含审批人、时间、凭据指纹。
+
+    P3 起这是**已验签凭证**的投影：``signed=True`` 表示它来自
+    :func:`medini_automation.domain.approval.verify_attestation` 的通过结果，
+    而不是调用方手写的四个字段。
+
+    本对象**不做密码学校验**（那需要信任根与公钥，属于应用层职责），
+    只承载校验结论。`ChangeSet.validate_for_apply` 因此只做结构检查 ——
+    真正拒绝未签名凭证的地方是 ``agent_api.apply_change``。
+    """
     approver: str            # 受信身份（工号/姓名）
-    approved_at: str         # ISO8601
+    approved_at: str         # ISO8601（签发时刻）
     credential_fingerprint: str  # 受信会话凭据指纹（如 SSO token hash）
     scope: str               # 批准范围（change_id 绑定）
+    # ---- P3 新增：签名凭证的完整投影（默认值保证旧构造点仍可用）----
+    expires_at: str = ""     # ISO8601，超过即失效
+    permission: str = "model_write"
+    nonce: str = ""          # 一次性，防重放
+    patch_hash: str = ""     # 签名绑定的补丁摘要（批准的是**内容**不是 change_id）
+    expected_baseline_hash: str = ""
+    signed: bool = False     # True = 经 Ed25519 验签通过
+    trust_source: str = ""   # 该授权人来自哪个信任根（审计用）
+
+    @classmethod
+    def from_verified(cls, verdict: dict[str, Any]) -> "ApprovalRef":
+        """从 `verify_attestation` 的返回构造。"""
+        return cls(
+            approver=verdict["approver"], approved_at=verdict["approved_at"],
+            credential_fingerprint=verdict.get("credential_fingerprint", ""),
+            scope=verdict["scope"], expires_at=verdict.get("expires_at", ""),
+            permission=verdict.get("permission", "model_write"),
+            nonce=verdict.get("nonce", ""),
+            patch_hash=verdict.get("patch_hash", ""),
+            expected_baseline_hash=verdict.get("expected_baseline_hash", ""),
+            signed=bool(verdict.get("signed")),
+            trust_source=verdict.get("trust_source", ""))
 
 
 @dataclass

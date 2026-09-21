@@ -70,8 +70,8 @@ python -m medini_automation.cli verify-diagram workcopy/AUTO-WC --case abc  # �
 | `run_analysis` / `reopen_check`（唯一落盘 `.fta` 的操作） | 是 |
 
 三大约束：**受控 project_id 白名单**（只有 `workcopy/AUTO-WC` 可写，既有工程
-`PROJECT_READ_ONLY`）、**基线语义哈希绑定**、**审批门禁**（只认受信任身份层签发的
-`ApprovalRef` —— Agent 传 `approved=true` 不是凭证）。
+`PROJECT_READ_ONLY`）、**基线语义哈希绑定**、**审批门禁**（P3 起只认受信任审批面板
+**签名**的凭证 —— Agent 传 `approved=true` 不是凭证，字段齐全但没签名也不是）。
 
 ```bash
 PY="C:/Users/Kogami/.workbuddy/binaries/python/envs/default/Scripts/python.exe"
@@ -98,10 +98,48 @@ DSH 事实**（insert 非 override / 多 profile 同步 / `serverName` 唯一）
 > 严格 stdio 冒烟均已验证，但「DSH 会话内发起一次真实工具调用」尚未验证
 > （撞额度上限）。见 `docs/API_EVIDENCE.md` § EV-MCP-DSH-20260921。
 
+## 审批面板（P3）
+
+写入必须持**签名凭证**。签发由受信任审批面板完成（本仓提供 CLI 实现）：
+
+```bash
+PY="C:/Users/Kogami/.workbuddy/binaries/python/envs/default/Scripts/python.exe"
+
+# 一次性配置：生成本机审批密钥（私钥落仓库外；公钥需**人工**登记进信任根）
+$PY -m medini_automation.cli key-init --identity <你的工号> --permission model_write
+#   → 按输出提示，把那一行填进 ~/.medini-approval/trust.json 的 approvers
+$PY -m medini_automation.cli trust        # 查看信任根 + Ed25519 自检
+
+# 每次变更：提案 → 审批 → 实施
+$PY -m medini_automation.cli prepare-change AUTO-WC abc --ops '[{"op":"set_probability","args":{"id":"A","probability":"1/5"}}]' --baseline-hash <hash>
+$PY -m medini_automation.cli approve <change_id> --key-file ~/.medini-approval/<工号>.key --out att.json
+$PY -m medini_automation.cli apply-change <change_id> --approval-file att.json
+```
+
+| 拒绝场景 | code |
+|---|---|
+| 手写四个字段冒充批准（`approved=true` 之类） | `APPROVAL_UNSIGNED` |
+| 用别的密钥冒充授权人 | `APPROVAL_SIGNATURE_INVALID` |
+| 凭证过期 / 尚未生效 | `APPROVAL_EXPIRED` / `APPROVAL_NOT_YET_VALID` |
+| 权限不含本变更所需 | `APPROVAL_PERMISSION_DENIED` |
+| 同一凭证用第二次 | `APPROVAL_REPLAYED` |
+| 信任根缺失（fail-closed） | `TRUST_ROOT_MISSING` |
+| 同幂等键 + 不同载荷 | `IDEMPOTENCY_CONFLICT` |
+| 有别的写者持有该工程 | `WRITER_BUSY` |
+
+**签名绑定 patch_hash** —— 批准的是这一次的具体内容，不是一张按 `change_id`
+可复用的空头支票；内容改了必须重新签。重发同一请求（同幂等键 + 同载荷）会
+`replayed=true` 返回首次结果，不会重复写入。
+
+> 边界：这是**控制面机制**，不是身份基础设施。私钥不加密，保护强度等于所在目录的
+> 访问控制。`key-init` 刻意不代登记公钥 —— 否则能跑 CLI 的 Agent 就能一键把自己
+> 变成合法审批人。详见 `docs/API_EVIDENCE.md` § EV-APPROVAL-20260921。
+
 ## 纪律红线（公共契约）
 
 1. medini 是唯一真实计算后端；Mock/合成结果必须标 synthetic
 2. 能力按操作粒度报告 verified/partial/unsupported/unverified，无实测不标 verified
-3. Agent 不能自批变更；approved=true 不是批准凭证
+3. **Agent 不能自批变更**：`approved=true` 不是凭证，**字段齐全但没签名的自述凭证也不是**
+   —— 只接受受信任审批面板签发的 Ed25519 凭证（授权人 / 权限 / 范围 / 有效期 / 一次性）
 4. 不静默简化：不支持的门/分布/语义显式阻塞
-5. 原始工程不直接覆盖；写入绑定基线哈希+幂等键
+5. 原始工程不直接覆盖；写入绑定基线哈希 + 幂等键 + 单写者锁；信任根缺失时 fail-closed

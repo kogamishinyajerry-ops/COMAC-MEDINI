@@ -306,3 +306,142 @@ reopen_check(publish=True) → 四重校核全绿（Q0==Q1==0.11、磁盘 SHA-25
 - `patch_dsh.py` 经 Bash 执行 + 单测验证；`.ps1` 仅为薄壳（本会话 PowerShell 工具无输出，
   故文件手术下沉到 Python 核心，`install.ps1` 缩到可肉眼审）
 
+## EV-APPROVAL-20260921 — 变更协调器：签名审批 / 幂等 / 单写者（P3，端到端实测）
+
+规划原文（`A_核心规划.md` L112、L114）：
+
+> 每个写入请求带 expected_baseline_hash、idempotency_key、patch_hash。
+> **审批由受信任的人机界面生成，服务端校验授权人、权限、范围与有效期；
+> Agent 不能通过传入"approved=true"自批。**
+> 同一幂等键与同一载荷返回既有作业；同一键配不同载荷拒绝。共享工作区初期采用单写者排队。
+
+### 为什么要自实现 Ed25519（而不是 `pip install cryptography`）
+
+`pyproject.toml` 声明 `dependencies = []`。审批签名是信任边界，给它单独引入第三方库
+会让"离线/内网部署"多一个未必装了的运行时依赖，也让安全关键路径被别人的版本漂移牵着走。
+自带实现是 ~190 行，性能足够（签名/验签各 ~4ms），且**正确性有官方外部权威可对**。
+
+**正确性判据 = RFC 8032 §7.1 官方测试向量**，不是往返自测 —— 自洽的错误实现
+（签名与验签同错）能骗过所有自洽的往返测试。实测 3/3 向量的公钥与签名**逐字节一致**。
+
+| 向量 | 消息长度 | 公钥 | 签名 |
+|---|---|---|---|
+| TEST 1 | 0 字节 | ✅ | ✅ |
+| TEST 2 | 1 字节 | ✅ | ✅ |
+| TEST 3 | 2 字节 | ✅ | ✅ |
+
+实现要点：扩展坐标（X:Y:Z:T）+ 双倍-加迭代，把模逆压到只在最终编码出现 ——
+仿射版每次标量乘要 ~500 次 `pow(x, p-2, p)`。拒绝 S ≥ L（防签名延展性）、
+拒绝非曲线点、拒绝非规范 y 编码。**不承诺**常量时间与侧信道防护（Python 解释器
+自身时间特性就不受控，且服务对象是本机审批面板，不是网络服务端）。
+
+### 签名载荷（覆盖 11 个字段，改任一字段即验签失败）
+
+```json
+{"v":1, "approver":"E12345", "approved_at":"...", "expires_at":"...",
+ "scope":"change:<change_id>", "project_id":"AUTO-WC",
+ "patch_hash":"<64hex>", "expected_baseline_hash":"<64hex>",
+ "permission":"model_write", "nonce":"<32hex>", "credential_fingerprint":"..."}
+```
+
+canonical JSON（`sort_keys` + 无空格 + ASCII）后 UTF-8 编码再签。
+
+**`patch_hash` 与 `expected_baseline_hash` 必须在签名里**：只绑 `change_id` 的话，
+批准的就是一张按 change_id 可复用的空头支票 —— change_id 不变、内容换掉，scope 照样"匹配"。
+
+### 九步校验链（每步给精确 code，不返回笼统的"审批无效"）
+
+| # | 检查 | 失败 code |
+|---|---|---|
+| 1 | 凭证是 dict 且有 `signature` | `NO_APPROVAL` / `APPROVAL_UNSIGNED` |
+| 2 | 11 个签名字段齐全 | `APPROVAL_INCOMPLETE`（列出缺哪些） |
+| 3 | 凭证版本受支持 | `APPROVAL_VERSION` |
+| 4 | `permission` 是合法值 | `APPROVAL_PERMISSION_UNKNOWN` |
+| 5 | 时间戳合法且带时区；`approved_at ≤ now < expires_at` | `APPROVAL_TIMESTAMP` / `APPROVAL_NOT_YET_VALID` / `APPROVAL_EXPIRED` |
+| 6 | `scope == change:<change_id>` | `APPROVAL_SCOPE_MISMATCH` |
+| 7 | `project_id` 与 `patch_hash` 与 `expected_baseline_hash` 逐项相等 | `APPROVAL_PROJECT_MISMATCH` / `APPROVAL_PATCH_MISMATCH` / `APPROVAL_BASELINE_MISMATCH` |
+| 8 | 授权人在信任根中、权限足够、有效期跨度未超信任根上限 | `TRUST_ROOT_MISSING` / `APPROVAL_UNKNOWN_APPROVER` / `APPROVAL_PERMISSION_DENIED` / `APPROVAL_VALIDITY_TOO_LONG` |
+| 9 | Ed25519 验签 | `APPROVAL_SIGNATURE_INVALID` |
+
+**信任根缺失 = fail-closed**：`<MEDINI_APPROVAL_HOME>/trust.json`（默认
+`~/.medini-approval`）不存在或解析失败时**拒绝一切审批**，并把原因写进
+`TrustRoot.source`（`cli trust` 会显示它），而不是"没有配置就放行"。
+`load_trust_root` 对任何畸形输入都退化为空 TrustRoot，从不向调用方抛异常。
+
+### 三处时序设计（都是"放错位置就出漏洞"的地方）
+
+1. **幂等短路在状态检查之前**：已成功实施的变更单状态是 `validated`，先查状态会把
+   合法重试误判成"状态不对"。重放要返回**第一次的结果**。
+2. **nonce 消费在锁内、落盘之前**：早于落盘 → 校验通过但随后失败会白烧一份批准；
+   晚于落盘 → 两个进程可能同时通过校验并双双写入。锁内 + 落盘前是唯一既不烧凭证
+   也不留重放窗口的位置。另有 **peek 早拒**（无副作用）："这份批准已被用过"比
+   "基线不匹配"更根本，用它去撞后续校验只会给出误导性的失败原因。
+3. **重放仍验签，但不查有效期**：重放针对的是那个**已完成**的作业；若要求凭证此刻
+   仍有效，"重试"就会因过期而失败，与「同一幂等键返回既有作业」直接冲突。
+
+### 端到端实测（CLI，全链走通 + 拒绝路径全拒）
+
+```
+key-init --identity E12345        → 生成密钥；**刻意不自动登记公钥**（见下）
+（人工把公钥填进 trust.json）
+trust                             → ed25519 selfcheck = true，列出授权人与权限
+read-project AUTO-WC --case abc   → baseline v2（4c2df5de…）
+prepare-change  A: 1/4 → 1/5      → change_id / patch_hash / idempotency_key
+approve --key-file ... --out ...  → 签发；nonce 74cd97b0…，有效期 1800s
+apply-change --approval-file ...  → ok，基线 v2 → v3，signed=true，记录 trust_source
+```
+
+| 场景 | 结果 |
+|---|---|
+| Agent 自批（手写 approver/approved_at/credential_fingerprint/scope 四字段） | **`APPROVAL_UNSIGNED`** —— P2 的漏洞正是这个：只比 scope 字符串 |
+| 用攻击者密钥冒充授权人（patch_hash / scope / 有效期全对） | **`APPROVAL_SIGNATURE_INVALID`** —— 字段全对也没用，只有密码学能挡 |
+| 无凭证提交未实施过的变更 | `NO_APPROVAL` |
+| 篡改凭证（改 patch_hash 一位）走幂等重放路径 | `APPROVAL_SIGNATURE_INVALID`（**见下方漏洞记录**） |
+| 重发同一请求（同幂等键 + 同载荷） | `replayed=true`，基线**未**被推第二次 |
+| 无凭证重放（"那笔到底写没写进去？"） | `ok` + `replayed=true` + `approval_reverified=false` |
+| 把变更单回滚成 awaiting_approval 再重放同一凭证 | `APPROVAL_REPLAYED`（nonce 一次性） |
+
+**语义哈希确定性（顺带验证出的一条性质）**：测试产生的变更把基线推到 v4，用一次
+正向变更把它改回 v2 的内容后，`semantic_hash` **精确回到 v2 的值**
+（`4c2df5de…`）—— 证明哈希是**内容确定**的（v4 ≡ v2），不掺入版本号或时间戳。
+`native_drift` 同时归零。变更全程留痕在 `changelog.jsonl`，
+可以看到 P2 的手写审批 `signed=None` 与 P3 的 `signed=True` 并列。
+
+### 端到端实测抓到的漏洞（单测没覆盖到）
+
+**篡改的凭证可以从幂等重放路径拿到 `ok`。** 幂等短路最初放在审批校验之前且不验签，
+于是一份 patch_hash 被改过的凭证在"幂等已命中"的情况下直接返回了首次结果。
+没有实际写入发生（`replayed=true`），但返回 `ok` 会给调用方
+「这份凭证有效」的错误信号。
+
+修法：幂等重放路径增加 `verify_signature_only()` —— 只验签名与授权人身份，
+不查有效期 / 绑定 / nonce（理由见上文时序设计 3）。回归测试
+`test_idempotent_replay_still_verifies_signature`。
+
+> **教训**：单测覆盖了"篡改凭证 → 拒绝"，但只覆盖了**首写**路径；
+> 端到端把真凭证用完之后再篡改，才走到"幂等重放"这条分支。
+> 拒绝路径的覆盖必须按**路径**穷举，不能按**输入**穷举。
+
+### 幂等 / 单写者 / 恢复记录的实现位置
+
+| 机制 | 模块 | 要点 |
+|---|---|---|
+| 审批 nonce 一次性 | `application/replay_guard.py::NonceStore` | `O_CREAT\|O_EXCL` 跨进程原子；文件名是 nonce 的 SHA-256 前缀（防路径穿越） |
+| 幂等键 | `replay_guard.py::IdempotencyStore` | 记录载荷摘要 + 首次完整返回值；同键同载荷 → replay，同键异载荷 → conflict |
+| 单写者 | `application/writer_lock.py::writer_lock` | 跨进程文件锁（`threading.Lock` 管不住 MCP/CLI/多会话）；stale 抢占写审计 `locks/<slug>.stale.jsonl`；释放时只删自己的锁 |
+| 恢复记录 | `agent_api._write_recovery` / `recovery_log` | 落盘中断写 `recovery.jsonl`（stage / nonce_consumed / 基线是否可能已推进）；`read_project.pending_recovery` 暴露；`clear_recovery` 人工清理 |
+
+### 诚实边界（未验证 / 不承诺）
+
+- **这不是身份基础设施。** 私钥不加密，保护强度等于所在目录的访问控制。
+  `key-init` **刻意不把公钥自动写进 trust.json** —— 否则能跑 CLI 的 Agent 就能一键
+  把自己变成合法审批人，"服务端校验授权人"立刻归零。登记必须人工完成。
+- 在本机单用户场景下，一个有完整文件权限的进程理论上能读到私钥。真正的隔离
+  （HSM / 独立审批机 / SSO 验签）不在本仓职责内 —— 见 `NEXT_STEPS.md` P4。
+- 未测：并发多进程同时 `apply_change` 同一工程（锁会串行化，但"锁竞争下的正确性"
+  只做了单进程内的 `WriterBusy` 断言）；未测崩溃恢复的端到端（`recovery.jsonl`
+  的写入被单测覆盖，但没有真的 kill 一次写到一半的进程）。
+- 未测：`apply_change` 的成功路径**仍是 synthetic 基线推进**（只改 `runs/agent/` 的
+  契约基线，不落 `.fta`）；`.fta` 落盘要等 `reopen_check`（需许可）。
+
+

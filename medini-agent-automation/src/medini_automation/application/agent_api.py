@@ -23,12 +23,21 @@ CLI 与 DSH/MCP 都只是这一层的薄封装（规划要求：先形成可脚�
 2. **基线绑定**：任何变更/分析都绑定当前基线哈希。``expected_baseline_hash``
    不匹配 → ``BASELINE_MISMATCH``。基线的唯一建立途径是 ``prepare_change``
    首次调用（显式传 ``expected_baseline_hash=None``），之后必须传真实哈希。
-3. **审批门禁**：``apply_change`` 只承认受信任身份层签发的 ``ApprovalRef``
-   （见 :mod:`medini_automation.domain.changeset`）。**Agent 传 approved=true
-   不是批准凭证**——本层根本不接受布尔批准字段。
-4. **只写工作副本**：``apply_change`` 拒绝 ``writable=False`` 的工程；原始工程
+3. **审批门禁（P3 升级为可验证凭证）**：``apply_change`` 只承认**受信任审批面板
+   用 Ed25519 签名**的凭证（见 :mod:`medini_automation.domain.approval`）。
+   服务端逐项校验：字段齐全 → 有效期（未生效/过期都拒）→ scope 绑定 →
+   **patch_hash 与基线哈希强绑定内容** → 授权人在信任根内 → 权限足够 →
+   验签 → nonce 未用过。**Agent 传 approved=true 不是批准凭证**——本层根本不
+   接受布尔批准字段，也不接受"字段齐全但没签名"的自述凭证。
+   信任根（``<MEDINI_APPROVAL_HOME>/trust.json``，默认 ``~/.medini-approval``）
+   缺失时 **fail-closed：拒绝一切审批**，而不是"没配置就放行"。
+4. **幂等**：同一幂等键 + 同一载荷 → 返回既有结果并标 ``replayed=True``；
+   同一键 + 不同载荷 → ``IDEMPOTENCY_CONFLICT``。重放不是错误，是调用方在重试。
+5. **单写者**：写入前对 ``<project_id>/<case>`` 取文件锁（跨进程，不是
+   ``threading.Lock``）。拿不到 → ``WRITER_BUSY`` 并附当前持有者。
+6. **只写工作副本**：``apply_change`` 拒绝 ``writable=False`` 的工程；原始工程
    永不被覆盖。
-5. **无占位**：不可用/未实现一律 ``status=blocked`` 并列出具体缺失因子；
+7. **无占位**：不可用/未实现一律 ``status=blocked`` 并列出具体缺失因子；
    不允许 success 占位。
 
 原生 ↔ 契约 的映射损失是**实测观察**（见 ``read_project`` 返回的
@@ -57,10 +66,19 @@ from ..adapters.medini_cli import (
     WORKCOPY_PROJECT_DEFAULT,
     WORKCOPY_PROJ_NAME,
 )
+from ..domain.approval import (
+    ApprovalContext,
+    ApprovalError,
+    load_trust_root,
+    verify_attestation,
+    verify_signature_only,
+)
 from ..domain.capability import initial_capabilities
 from ..domain.changeset import ApprovalRef, ChangeOp, ChangeSet
 from ..domain.model import ContractError, from_contract_json
 from ..worker.job import JobStore
+from .replay_guard import IdempotencyStore, NonceStore
+from .writer_lock import WriterBusy, read_lock_holder, writer_lock
 from .. import __version__
 
 __all__ = [
@@ -68,6 +86,7 @@ __all__ = [
     "RUNS_ROOT", "STATE_ROOT",
     "get_capabilities", "read_project", "prepare_change", "apply_change",
     "run_analysis", "get_job", "readback", "export_evidence", "reopen_check",
+    "recovery_log", "clear_recovery", "idempotency_record",
 ]
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -442,6 +461,16 @@ def read_project(project_id: str, *, case: str | None = None) -> dict[str, Any]:
         "connections": len(native["connections"]),
     }
 
+    # 上一次写入中断留下的现场（P3 恢复记录）。有值就说明"上次写到一半"，
+    # 调用方应先核对现状再决定要不要重新提案 —— 不要直接重试 apply_change。
+    out["pending_recovery"] = [r for r in recovery_log(project_id)
+                              if r.get("case") == case]
+    if out["pending_recovery"]:
+        out["next_action"] = (
+            f"检测到 {len(out['pending_recovery'])} 条未清理的恢复记录（上次写入"
+            "中断）。先看 pending_recovery 里的 stage 判断写到哪一步，"
+            "核对基线后再重新提案；人工确认现场已处理后可清除记录")
+
     base = _load_baseline(project_id, case)
     if base is None:
         out["baseline"] = None
@@ -658,11 +687,13 @@ def prepare_change(project_id: str, case: str, ops: list[dict[str, Any]], *,
     blob = {
         "change_id": change.change_id, "project_id": project_id, "case": case,
         "expected_baseline_hash": base_hash, "patch_hash": change.patch_hash(),
+        "idempotency_key": change.idempotency_key,
         "candidate_hash": cand_hash, "baseline_version": version,
         "bootstrapped": bootstrapped, "ops": [{"op": o.op, "args": o.args}
                                               for o in parsed],
         "reason": reason, "source": source,
         "evidence_refs": list(evidence_refs or []),
+        "required_permission": change.required_permission,
         "state": change.state,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "candidate_contract": candidate,
@@ -678,14 +709,18 @@ def prepare_change(project_id: str, case: str, ops: list[dict[str, Any]], *,
         "baseline_hash": base_hash, "candidate_hash": cand_hash,
         "baseline_version": version, "next_version": version + 1,
         "patch_hash": change.patch_hash(),
+        "idempotency_key": change.idempotency_key,
+        "required_permission": change.required_permission,
         "ops": [{"op": o.op, "args": o.args} for o in parsed],
         "diff": diff,
         "change_file": str(cpath),
         "requires_approval": True,
         "next_action": (
-            "变更处于 awaiting_approval。apply_change 只承认受信任身份层签发的 "
-            "ApprovalRef（approver / approved_at / credential_fingerprint / "
-            "scope=change:<change_id>）；Agent 自述的批准不会被接受"),
+            "变更处于 awaiting_approval。apply_change 只承认受信任审批面板"
+            "**签名**的凭证（Ed25519，覆盖 approver/scope/patch_hash/"
+            "基线哈希/有效期/nonce）——字段齐全但没签名的自述凭证会被 "
+            "APPROVAL_UNSIGNED 拒绝。签发：cli approve --change-id "
+            f"{change.change_id} --key-file <私钥>"),
     }
 
 
@@ -787,12 +822,87 @@ def _rand6() -> str:
 
 
 # =========================================================== 4. 变更实施
+def _recovery_path(pid: str) -> Path:
+    return _project_state(pid) / "recovery.jsonl"
+
+
+def _write_recovery(pid: str, row: dict[str, Any]) -> None:
+    """写一条恢复记录。**绝不因为写日志本身失败而掩盖原始异常**。"""
+    try:
+        p = _recovery_path(pid)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:                       # noqa: BLE001 — 有意全兜
+        pass
+
+
+def recovery_log(project_id: str) -> list[dict[str, Any]]:
+    """未清理的恢复记录 —— apply 中断留下的现场。
+
+    规划（A_核心规划.md L80）要求变更协调器产出「执行日志、恢复记录」；
+    中断后的现场必须能查得到，否则"上次到底写到哪一步"只能靠猜。
+    """
+    p = _recovery_path(project_id)
+    if not p.exists():
+        return []
+    return [json.loads(ln) for ln in
+            p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def clear_recovery(project_id: str, change_id: str) -> int:
+    """人工核对现场后清除指定变更的恢复记录。返回清除条数。"""
+    p = _recovery_path(project_id)
+    if not p.exists():
+        return 0
+    rows = [json.loads(ln) for ln in
+            p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    kept = [r for r in rows if r.get("change_id") != change_id]
+    removed = len(rows) - len(kept)
+    if removed:
+        p.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n"
+                             for r in kept), encoding="utf-8")
+    return removed
+
+
+def idempotency_record(project_id: str, case: str) -> list[dict[str, Any]]:
+    """该工程/切片已登记过的幂等记录（审计用，不含结果载荷）。"""
+    d = IdempotencyStore(STATE_ROOT).dir
+    if not d.is_dir():
+        return []
+    out: list[dict[str, Any]] = []
+    for p in sorted(d.glob("*.json")):
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:                   # noqa: BLE001
+            continue
+        result = rec.get("result") or {}
+        if result.get("project_id") == project_id and result.get("case") == case:
+            out.append({"key": rec.get("key"), "payload_hash": rec.get("payload_hash"),
+                        "operation": rec.get("operation"), "at": rec.get("at"),
+                        "actor": rec.get("actor")})
+    return out
+
+
 @_guard
-def apply_change(change_id: str, *, approval: dict[str, Any] | None = None) -> dict[str, Any]:
+def apply_change(change_id: str, *, approval: dict[str, Any] | None = None,
+                 idempotency_key: str | None = None) -> dict[str, Any]:
     """在**副本**实施已批准变更；绑定基线 + 补丁 + 适配器版本。
 
-    ``approval`` 必须是受信任身份层签发的审批引用；缺字段或 scope 不绑定本变更
-    一律拒绝。本函数**不接受**布尔式 ``approved`` 参数。
+    ``approval`` 必须是受信任审批面板**签名**的凭证（Ed25519）。本函数
+    **不接受**布尔式 ``approved`` 参数，也不接受"字段齐全但没签名"的自述凭证
+    —— 后者正是 P2 的漏洞：只查 scope 字符串，等于让 Agent 自己写四个字段就通过。
+
+    门禁顺序（从便宜到贵，每步给精确 code）：
+
+    1. 幂等短路（重放返回既有结果，**不是错误**）
+    2. 变更单状态 = ``awaiting_approval``
+    3. 审批校验链（字段 → 有效期 → scope → 内容绑定 → 授权人 → 权限 → 验签）
+    4. 变更单防篡改（重算 patch_hash）
+    5. 单写者文件锁
+    6. 基线二次核对（批准之后基线可能被别人推进）
+    7. nonce 一次性消费（与基线落盘同一临界区）
+    8. 落盘 + 幂等登记（任一步失败写恢复记录）
     """
     cpath = _change_path(change_id)
     if not cpath.exists():
@@ -804,34 +914,82 @@ def apply_change(change_id: str, *, approval: dict[str, Any] | None = None) -> d
 
     entry = _writable(pid)
 
+    key = idempotency_key or blob.get("idempotency_key") or ""
+    patch_hash = blob["patch_hash"]
+
+    # ---- 幂等短路：必须在状态检查之前 ----
+    # 已成功实施的变更单状态是 validated，若先查状态就会把"重试"误判成
+    # "状态不对"。重放要返回**第一次的结果**，让调用方不必自己判断写没写进去。
+    if key:
+        verdict = IdempotencyStore(STATE_ROOT).lookup(key, patch_hash)
+        if verdict.state == "conflict":
+            return _refused(
+                "IDEMPOTENCY_CONFLICT",
+                "同一幂等键被用于不同载荷 —— 重发重试可以，换内容必须换键",
+                hint=(verdict.detail + "；新变更请用 medini_prepare_change "
+                      "生成的新键，不要手改幂等键"),
+                recovery="medini_prepare_change",
+                change_id=change_id, idempotency_key=key)
+        if verdict.state == "replay" and verdict.record:
+            # 重放也要验签：否则一份**被篡改的凭证**会从这条路拿到 ok，
+            # 给调用方"这份凭证有效"的错误信号（端到端实测抓到过这个漏洞）。
+            # 但只验签名，不查有效期/绑定/nonce —— 首次执行时已查过，
+            # 重放针对的是那个**已完成的作业**，不该要求凭证此刻仍然有效。
+            if approval:
+                ok, why = verify_signature_only(approval)
+                if not ok:
+                    return _refused(
+                        "APPROVAL_SIGNATURE_INVALID",
+                        f"幂等重放时验签失败：{why}",
+                        hint=("幂等键命中了既有作业，但本次提供的凭证没有有效签名"
+                              "（被篡改或授权人不在信任根）。首次结果不受本次调用"
+                              "影响 —— 但别把它当成「这份凭证可用」的证明"),
+                        recovery="medini_prepare_change", change_id=change_id,
+                        idempotency_key=key)
+            first = verdict.record
+            return {**(first.get("result") or {}), "replayed": True,
+                    "replayed_from": first.get("at"),
+                    "change_id": change_id, "idempotency_key": key,
+                    "approval_reverified": bool(approval),
+                    "note": ("幂等命中：未重复写入，以下为首次执行的原始结果"
+                             "（逐字段一致）")}
+
     if blob.get("state") != "awaiting_approval":
         return _refused(
             "CHANGE_STATE", f"变更单状态 {blob.get('state')!r} 不可实施",
             hint="只有 awaiting_approval 的变更单可实施",
             recovery="medini_read_project", change_id=change_id)
 
-    # ---- 审批门禁（唯一入口：受信任身份层）----
-    if not approval:
-        return _refused(
-            "NO_APPROVAL",
-            "变更未经受信任身份批准，禁止写入工作副本",
-            hint=("需要受信任身份层签发的 approval={approver, approved_at, "
-                  "credential_fingerprint, scope}；"
-                  "Agent 自述的批准（如 approved=true）不是批准凭证"),
-            recovery="medini_prepare_change", change_id=change_id)
+    # ---- 审批校验链（唯一入口：受信任审批面板签名）----
+    ctx = ApprovalContext(
+        change_id=change_id, project_id=pid, patch_hash=patch_hash,
+        expected_baseline_hash=blob["expected_baseline_hash"],
+        required_permission=blob.get("required_permission", "model_write"))
+    try:
+        vref = verify_attestation(approval or {}, context=ctx)
+    except ApprovalError as exc:
+        return _refused(exc.code, exc.message, hint=exc.hint,
+                        recovery=exc.recovery or "medini_prepare_change",
+                        change_id=change_id)
+    ref = ApprovalRef.from_verified(vref)
 
-    required = ("approver", "approved_at", "credential_fingerprint", "scope")
-    missing = [k for k in required if not approval.get(k)]
-    if missing:
-        return _refused("APPROVAL_INCOMPLETE",
-                        f"审批引用缺字段 {missing}",
-                        hint=f"必需字段：{', '.join(required)}",
-                        recovery="medini_prepare_change", change_id=change_id)
+    # ---- 凭证一次性（早拒）：这里只 peek，真正的消费在锁内落盘前 ----
+    # 早拒的理由：「这份批准已经被用过了」比「基线不匹配」更根本 —— 拿一份
+    # 用过的凭证去撞任何一条后续校验，都会给出误导性的失败原因。
+    # 只 peek 不消费，是为了不让"后续校验失败"白白烧掉一份批准。
+    if ref.nonce:
+        seen = NonceStore(STATE_ROOT).peek(ref.nonce)
+        if seen.is_replay:
+            return _refused(
+                "APPROVAL_REPLAYED",
+                (f"该审批凭证已被使用过（{seen.first_used_at} 由 "
+                 f"{seen.first_used_by or '未知'}，范围 "
+                 f"{seen.conflicting_scope or ref.scope}）"),
+                hint=("审批凭证是一次性的 —— 这是防重放，不是错误。"
+                      "需要再次写入就重新走审批（内容没变也要重新签）"),
+                recovery="medini_prepare_change", change_id=change_id,
+                nonce=ref.nonce)
 
-    ref = ApprovalRef(
-        approver=approval["approver"], approved_at=approval["approved_at"],
-        credential_fingerprint=approval["credential_fingerprint"],
-        scope=approval["scope"])
     cs = ChangeSet(
         change_id=change_id, project_id=pid,
         expected_baseline_hash=blob["expected_baseline_hash"],
@@ -843,12 +1001,38 @@ def apply_change(change_id: str, *, approval: dict[str, Any] | None = None) -> d
                         hint=f"批准必须绑定本变更：scope=change:{change_id}",
                         recovery="medini_prepare_change", change_id=change_id)
 
-    # ---- 绑定项二次核对（批准之后基线可能被别人推进）----
-    if cs.patch_hash() != blob["patch_hash"]:
+    # ---- 变更单防篡改（落盘内容与 patch_hash 必须自洽）----
+    if cs.patch_hash() != patch_hash:
         return _refused("PATCH_HASH_MISMATCH",
                         "变更单内容与 patch_hash 不符（落盘后被改动）",
                         hint="重新 prepare_change，不要手工编辑变更单",
                         recovery="medini_prepare_change", change_id=change_id)
+
+    # ---- 单写者：跨进程文件锁 ----
+    lock_scope = f"{pid}/{case}"
+    try:
+        with writer_lock(lock_scope, root=STATE_ROOT, actor=ref.approver):
+            return _apply_under_lock(change_id, cpath, blob, ref, cs, key)
+    except WriterBusy as exc:
+        st = read_lock_holder(STATE_ROOT, lock_scope)
+        h = st.holder
+        return _refused(
+            "WRITER_BUSY", str(exc),
+            hint=(f"当前持有者 {h.get('actor')}（pid {h.get('pid')}，"
+                  f"自 {h.get('at')}，已 {st.age_s}s）。写作业是秒级的："
+                  "稍后重试即可；若确认该进程已崩溃，锁会在 stale 超时"
+                  "后被自动抢占（抢占动作有审计记录）"),
+            recovery="medini_read_project", change_id=change_id,
+            lock_holder=h)
+
+
+def _apply_under_lock(change_id: str, cpath: Path, blob: dict[str, Any],
+                      ref: ApprovalRef, cs: ChangeSet,
+                      key: str) -> dict[str, Any]:
+    """持锁执行。调用方已保证锁在手 —— 本函数只管"把事做完或留下现场"。"""
+    pid, case = blob["project_id"], blob["case"]
+    entry = _writable(pid)
+    stage = "precheck"
 
     base = _load_baseline(pid, case)
     if base is None:
@@ -863,42 +1047,103 @@ def apply_change(change_id: str, *, approval: dict[str, Any] | None = None) -> d
             hint="基线在批准后变化——必须重新提案并重新取得批准",
             recovery="medini_read_project", change_id=change_id)
 
-    # ---- 落盘：工作副本的新基线 ----
-    candidate = blob["candidate_contract"]
-    new_meta = {
-        "project_id": pid, "case": case,
-        "version": int(blob["baseline_version"]) + 1,
-        "semantic_hash": blob["candidate_hash"],
-        "prev_semantic_hash": blob["expected_baseline_hash"],
-        "patch_hash": blob["patch_hash"], "change_id": change_id,
-        "approved_by": ref.approver, "approved_at": ref.approved_at,
-        "credential_fingerprint": ref.credential_fingerprint,
-        "adapter_version": __version__, "contracts_version": CONTRACTS_VERSION,
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-    }
-    cp, _ = _baseline_paths(pid, case)
-    _store_baseline(pid, case, candidate, new_meta)
-    blob["state"] = "validated"
-    blob["applied_at"] = new_meta["updated_at"]
-    cpath.write_text(json.dumps(blob, ensure_ascii=False, indent=2),
-                     encoding="utf-8")
-    _append_change_log(pid, case, {"change_id": change_id,
-                                   "from": meta["semantic_hash"],
-                                   "to": blob["candidate_hash"],
-                                   "approver": ref.approver,
-                                   "at": new_meta["updated_at"]})
+    # ---- nonce 一次性消费：与基线落盘同一临界区 ----
+    # 若在校验阶段就消费，校验通过但随后失败会白白烧掉一份批准；
+    # 若在落盘之后消费，两个进程可能同时通过校验并双双写入。
+    # 放在锁内的落盘之前，是唯一既不烧凭证也不留重放窗口的位置。
+    nonces = NonceStore(STATE_ROOT)
+    if ref.nonce:
+        verdict = nonces.consume(ref.nonce, actor=ref.approver, scope=ref.scope)
+        if verdict.is_replay:
+            return _refused(
+                "APPROVAL_REPLAYED",
+                (f"该审批凭证已被使用过（{verdict.first_used_at} 由 "
+                 f"{verdict.first_used_by or '未知'}，范围 "
+                 f"{verdict.conflicting_scope or ref.scope}）"),
+                hint=("审批凭证是一次性的 —— 这是防重放，不是错误。"
+                      "需要再次写入就重新走审批（内容没变也要重新签）"),
+                recovery="medini_prepare_change", change_id=change_id,
+                nonce=ref.nonce)
 
-    return {
-        "status": _OK, "change_id": change_id,
-        "project_id": pid, "case": case,
-        "applied_to": str(cp),
-        "baseline": new_meta,
-        "ops_applied": len(blob["ops"]),
-        "target_project_writable": entry.writable,
-        "note": ("只写本仓工作副本与控制面状态；既有工程未被触碰"
-                 "（纪律红线 §5）"),
-        "next_action": "medini_run_analysis（model_hash 用新的 semantic_hash）",
-    }
+    try:
+        candidate = blob["candidate_contract"]
+        new_meta = {
+            "project_id": pid, "case": case,
+            "version": int(blob["baseline_version"]) + 1,
+            "semantic_hash": blob["candidate_hash"],
+            "prev_semantic_hash": blob["expected_baseline_hash"],
+            "patch_hash": blob["patch_hash"], "change_id": change_id,
+            "approved_by": ref.approver, "approved_at": ref.approved_at,
+            "approval_expires_at": ref.expires_at,
+            "approval_nonce": ref.nonce,
+            "approval_signed": ref.signed,
+            "approval_permission": ref.permission,
+            "trust_source": ref.trust_source,
+            "credential_fingerprint": ref.credential_fingerprint,
+            "idempotency_key": key,
+            "adapter_version": __version__, "contracts_version": CONTRACTS_VERSION,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        cp, _ = _baseline_paths(pid, case)
+
+        stage = "write_baseline"
+        _store_baseline(pid, case, candidate, new_meta)
+
+        stage = "update_change_state"
+        blob["state"] = "validated"
+        blob["applied_at"] = new_meta["updated_at"]
+        blob["approval_nonce"] = ref.nonce
+        blob["approved_by"] = ref.approver
+        cpath.write_text(json.dumps(blob, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
+
+        stage = "append_changelog"
+        _append_change_log(pid, case, {
+            "change_id": change_id, "from": meta["semantic_hash"],
+            "to": blob["candidate_hash"], "approver": ref.approver,
+            "signed": ref.signed, "permission": ref.permission,
+            "nonce": ref.nonce, "idempotency_key": key,
+            "at": new_meta["updated_at"]})
+
+        result = {
+            "status": _OK, "change_id": change_id,
+            "project_id": pid, "case": case,
+            "applied_to": str(cp),
+            "baseline": new_meta,
+            "ops_applied": len(blob["ops"]),
+            "target_project_writable": entry.writable,
+            "approved_by": ref.approver, "approval_signed": ref.signed,
+            "approval_permission": ref.permission,
+            "approval_expires_at": ref.expires_at,
+            "approval_nonce": ref.nonce, "trust_source": ref.trust_source,
+            "idempotency_key": key, "replayed": False,
+            "note": ("只写本仓工作副本与控制面状态；既有工程未被触碰"
+                     "（纪律红线 §5：原始工程不直接覆盖）"),
+            "next_action": "medini_run_analysis（model_hash 用新的 semantic_hash）",
+        }
+
+        stage = "record_idempotency"
+        if key:
+            IdempotencyStore(STATE_ROOT).record(
+                key, blob["patch_hash"], "apply_change", result,
+                actor=ref.approver)
+    except Exception as exc:                # noqa: BLE001 — 留现场再抛
+        _write_recovery(pid, {
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "change_id": change_id, "case": case, "stage": stage,
+            "error": f"{type(exc).__name__}: {exc}",
+            "state": "recovery_required",
+            "nonce_consumed": bool(ref.nonce),
+            "baseline_may_have_advanced": stage in
+            ("write_baseline", "update_change_state", "append_changelog",
+             "record_idempotency"),
+            "note": ("写入中断。基线可能已推进而变更单未同步 —— 先 "
+                     "medini_read_project 核对现状，再决定是否重新提案；"
+                     "不要直接重试 apply_change"),
+        })
+        raise
+
+    return result
 
 
 def _append_change_log(pid: str, case: str, row: dict[str, Any]) -> None:

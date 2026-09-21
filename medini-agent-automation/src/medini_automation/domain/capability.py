@@ -42,6 +42,8 @@ def initial_capabilities(adapter_version: str) -> list[Capability]:
       publish_diagram_gui_visible verified
     - P2 受控操作接口层 9 操作实机闭环 + MCP stdio server 严格冒烟通过；
       但「DSH 会话内真实工具调用」未验证（额度上限）→ MCP 项只标 partial
+    - P3 审批门禁升级为**可验证凭证**（自实现 Ed25519 + 权限/范围/有效期/
+      一次性 nonce）+ 幂等 + 单写者锁 + 恢复记录 → 新增两项 verified
     """
     return [
         Capability(
@@ -133,6 +135,45 @@ def initial_capabilities(adapter_version: str) -> list[Capability]:
                 "ApprovalRef —— 真身份基础设施不在本仓职责内；apply_change 只推进基线，"
                 ".fta 漂移由 reopen_check 消解"),
             evidence_id="EV-AGENT-API-20260921",
+        ),
+        Capability(
+            capability_id="medini.signed_approval_gateway",
+            status="verified",
+            software_version="adapter-0.1.0",
+            adapter_version=adapter_version,
+            method=(
+                "P3 端到端（2026-09-21）：自实现 Ed25519（RFC 8032 §7.1 官方"
+                "向量 3/3 逐字节一致，非自洽往返测试）+ 审批校验链；CLI 全链"
+                "key-init → trust → prepare-change → approve → apply-change 走通。"
+                "负例全部被精确 code 拒绝：Agent 自批（APPROVAL_UNSIGNED）、"
+                "伪造密钥冒充（APPROVAL_SIGNATURE_INVALID）、过期（APPROVAL_EXPIRED）、"
+                "未生效（APPROVAL_NOT_YET_VALID）、权限不足"
+                "（APPROVAL_PERMISSION_DENIED）、越界有效期"
+                "（APPROVAL_VALIDITY_TOO_LONG）、凭证重放（APPROVAL_REPLAYED）、"
+                "信任根缺失（TRUST_ROOT_MISSING，fail-closed）"),
+            restrictions=(
+                "**仍是控制面机制，不是身份基础设施**：私钥不加密，保护强度等于"
+                "所在目录的访问控制；信任根（默认 ~/.medini-approval/trust.json）"
+                "必须由人工登记授权人；不承诺 Ed25519 的侧信道防护。"
+                "凭证携带有效期与一次性 nonce，默认放仓库外正是为了让 Agent 无从自签"),
+            evidence_id="EV-APPROVAL-20260921",
+        ),
+        Capability(
+            capability_id="medini.idempotent_single_writer",
+            status="verified",
+            software_version="adapter-0.1.0",
+            adapter_version=adapter_version,
+            method=(
+                "P3 端到端（2026-09-21）：同一幂等键 + 同载荷 → 返回首次结果"
+                "（replayed=true，基线未被推第二次）；同键异载荷 → "
+                "IDEMPOTENCY_CONFLICT；跨进程文件锁 → WRITER_BUSY（附当前持有者）；"
+                "stale 锁可抢占且写审计；落盘中断写 recovery.jsonl 并由 "
+                "read_project.pending_recovery 暴露"),
+            restrictions=(
+                "锁的 stale 超时默认 900s（短于此的崩溃不会被抢占）；"
+                "幂等记录含首次完整结果，故文件随变更数线性增长（无自动清理）；"
+                "规划 L114 的「排队」语义只在显式传 wait_s 时生效，默认立即失败"),
+            evidence_id="EV-APPROVAL-20260921",
         ),
         Capability(
             capability_id="medini.mcp_dsh_bridge",

@@ -69,17 +69,56 @@
 智谱 Coding Plan 5 小时额度上限（`RATE_LIMIT 429 / code 1308`，22:25 重置）。
 调用链已写入 `integrations/dsh/README.md`「推荐调用链」，可直接照做。
 
-## P3 — 变更协调器实装（A03 工作包）
+## ✅ P3 — 变更协调器实装（A03 工作包，已完成 2026-09-21）
 
-- ChangeSet（已建模）接入真实审批流：受信身份层签名 + 基线/补丁哈希执行前核对
-- 现状：门禁链已在 `apply_change` 落地（六重），P3 要做的是把 `ApprovalRef` 的
-  **签发方**接上真实身份层，而非当前的受控等价物
-- 验收：旧基线/重复请求/伪造批准三类测试通过（部分已在单测）
+规划要求（`A_核心规划.md` L80 / L112 / L114）：
 
-## P4 — 接入既有工程（首期范围外，待重新评估）
+> 变更协调器：差异预览、批准、幂等、锁、恢复与基线校验 → ChangeSet、执行日志、恢复记录
+> 每个写入请求带 expected_baseline_hash、idempotency_key、patch_hash。
+> **审批由受信任的人机界面生成，服务端校验授权人、权限、范围与有效期**；
+> Agent 不能通过传入"approved=true"自批。
+> 同一幂等键与同一载荷返回既有作业；同一键配不同载荷拒绝。共享工作区初期采用单写者排队。
+
+- **审批门禁升级为可验证凭证**：自实现 Ed25519（`domain/ed25519.py`，RFC 8032 §7.1
+  官方向量 3/3 逐字节一致）替代"查四个字段"。凭证签名覆盖 11 个字段，**绑定
+  patch_hash 与基线哈希**——批准的是**内容**，不是一张按 change_id 可复用的空头支票
+- **九步校验链**（`domain/approval.py`）：字段齐全 → 版本 → 权限合法 → 有效期
+  （未生效 / 过期都拒，上限由信任根强制）→ scope → 工程 → patch_hash → 基线哈希 →
+  授权人（信任根）→ 验签。**信任根缺失 = fail-closed**，不是"没配置就放行"
+- **一次性 nonce**（`application/replay_guard.py::NonceStore`）：与基线落盘同一临界区
+  消费（早于校验失败会白烧凭证，晚于落盘会留重放窗口）
+- **幂等**（`IdempotencyStore`）：同键同载荷 → 返回首次结果（`replayed=true`，
+  不再写）；同键异载荷 → `IDEMPOTENCY_CONFLICT`。重放**仍验签**（只验签，不查有效期
+  —— 首次已查过，否则"重试"会因凭证过期失败）
+- **单写者**（`application/writer_lock.py`）：跨进程文件锁 + stale 抢占（带审计）
+- **恢复记录**：落盘中断写 `recovery.jsonl`（含 stage / 非 consumed / 基线是否可能已推进），
+  由 `read_project.pending_recovery` 暴露，人工核对后 `clear_recovery`
+- **CLI**：`key-init`（生成密钥，**刻意不代登记公钥**）/ `approve`（签发放）/
+  `trust`（查看信任根 + Ed25519 自检）；`apply-change` 加 `--idempotency-key`
+- **验收达成**（A03：「预览后执行；旧基线/重复请求测试通过」）：
+  - 预览后执行 = `prepare-change` → `approve` → `apply-change` 三段，CLI 全链实测走通
+  - 旧基线 = `BASELINE_MISMATCH`（批准后基线被推进 → 拒绝，实测）
+  - 重复请求 = 幂等重放返回既有结果 / 异载荷冲突 / 凭证重放 `APPROVAL_REPLAYED`
+  - 另：Agent 自批 → `APPROVAL_UNSIGNED`；伪造密钥冒充 → `APPROVAL_SIGNATURE_INVALID`
+- 测试 223 → **316**；能力矩阵 10 → 12 项（新增 `signed_approval_gateway`、
+  `idempotent_single_writer`，均 verified）
+- 证据：`docs/API_EVIDENCE.md` § EV-APPROVAL-20260921
+
+**未闭合**：审批仍是**控制面机制**，不是身份基础设施。信任根（`~/.medini-approval/trust.json`）
+必须人工登记授权人，私钥不加密、保护强度等于目录访问控制 —— 见 P4。
+
+## P4 — 真实身份基础设施（把受控等价物换成真东西）
+
+- 现状：私钥文件 + 人工登记的 trust.json。有完整文件权限的进程理论上能读到私钥
+- 动作：接上真实签发方 —— SSO/OIDC token 验签、HSM/TPM 托管私钥、独立审批机
+  （审批在另一台机器上完成，本机只有公钥）
+- 验收：本机即使被完全控制也无法产出有效批准；审批行为进入组织审计日志
+- 前置：需要组织侧身份服务对接，不是纯代码工作
+
+## P5 — 接入既有工程（首期范围外，待重新评估）
 
 - 现状：`medini.update_existing_project` 仍为 `unverified`（首期只做工作副本新建树）
-- 前置：P3 审批流实装完成（改既有工程必须有真实审批链）
+- 前置：P4 完成（改既有工程必须有真实审批链，而不是控制面等价物）
 
 ## 明确不做（首期）
 
