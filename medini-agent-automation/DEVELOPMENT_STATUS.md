@@ -22,7 +22,7 @@
 | cli/ | **十七子命令** doctor / capabilities / validate / dry-run / run / readback / reopen-check / publish-diagram / visibility / verify-diagram / read-project / prepare-change / apply-change / export-evidence / **key-init** / **approve** / **trust**，全部真实实现（`capabilities` 委托 `agent_api`，消除输出分叉） |
 | **integrations/dsh/** | **P2 DSH 接入：`server.py`（MCP stdio，9 工具零业务逻辑）+ `patch_dsh.py`（配置手术：insert 非 override / 双 profile 同步 / BOM+LF 护栏）+ `verify.py`（严格握手冒烟）+ 薄壳 `install.ps1` / `uninstall.ps1` + `README.md`** |
 | scripts/medini/ | `slice-run-case.js`（计算）+ `slice-save.js`（阶段A 落盘）+ `slice-reopen.js`（阶段B 重载）+ `probe-model.js`（结构探针）+ `verify-diagram.js`（图校验 7 checks） |
-| scripts/ | `open-workcopy-gui.bat`（人工复核入口：链接工程 + 启 GUI）、`start-license.bat`（纯 ASCII + goto 模式） |
+| scripts/ | **`open-workcopy-gui.bat`（人工复核入口：链接工程 + 启 GUI）**、`start-license.bat`（纯 ASCII + goto 模式）、**`stability_sampling.py`（验收门采样器：N 连跑 × 3 快照，静默错误四条判定）** |
 | tests/ | **310 非实机测试 + 6 集成测试（real_medini）**，含 `test_agent_api.py`（P2/P3 受控操作 + 审批门禁 + 幂等 + 锁 + 恢复记录）、`test_approval.py`（77：审批校验链逐条拒绝路径 + nonce + 幂等 + 写锁）、`test_ed25519.py`（RFC 8032 官方向量 + 负例）、`test_dsh_patch.py`（含真实 stdio 子进程冒烟） |
 | workcopy/AUTO-WC/ | 本仓自有的 medini 工作副本工程（P1/P2 写盘目标，不触碰既有工程） |
 | docs/ | ENVIRONMENT_AUDIT / API_EVIDENCE / OPERATING_LIMITS / OFFLINE_SETUP / NEXT_STEPS / LICENSE_FIX_20260921 |
@@ -49,6 +49,9 @@
 | **`python integrations/dsh/verify.py --call`** | **0** | **PASS：tools/list 恰好 9 个、tools/call `ok=true`、server exit=0、stderr 空、不相关 cwd（`Path.home()`）下同样通过** |
 | **`python integrations/dsh/patch_dsh.py status --repo . --dsh-home D:\dsh\home`** | **0** | **两 profile 均已写入：web 538 行 / tui 424 行，无 BOM、无 CRLF、BEGIN=1 END=1** |
 | **`dsh --profile web --dump-config`** | **0** | **`medini-auto` 正确合成进插件树（web L850、tui L679 `serverName: medini-auto`）；web 18 / tui 17 个 mcp-client 实例；无 medini-auto 相关警告** |
+| **`python scripts/stability_sampling.py --runs 10`（实机，正式）** | **0** | **PASS —— 验收门第一道关闭：3 快照 × 10 连跑（9m39s），run 30/30 + reopen 30/30，静默错误 0，数值漂移 0，Q 相对误差 0.00e+00 各次一致（medini 与独立参考逐次精确相等），耗时 abc 6.83±0.08s / or_save 6.87±0.15s / vote 6.82±0.10s。报告 `runs/stability/20260921-222500/summary.json`** |
+| `python scripts/stability_sampling.py --runs 3`（实机，预跑） | 0 | PASS：9/9 + 9/9，静默错误 0 |
+| `python scripts/stability_sampling.py --runs 2 --dry` | 0 | DRY-OK（采样器结构验证：跑满、有证据目录、无异常） |
 | `python 03_contracts/verify_seed_cases.py`（开工包） | 0 | 15/15 PASS |
 
 关键证据包：
@@ -90,6 +93,9 @@
 | 项 | 状态 |
 |---|---|
 | **DSH 会话内发起真实工具调用** | **BLOCKED:智谱 Coding Plan 5 小时额度上限**（`RATE_LIMIT 429 / code 1308`，22:25 重置）。已验证：配置被 DSH 正确合成（`--dump-config`）+ server 通过严格 stdio 冒烟 + 子进程 `stdin=DEVNULL` 已就位。待用户在重置后于新 DSH 会话复验（调用链见 `integrations/dsh/README.md`） |
+| ~~验收门①：连续 10 次无静默错误~~ | **已关闭（2026-09-21 22:25–22:35）**：3 快照 × 10 连跑全绿，见上表 |
+| 验收门②：10 个 Gold Case（7 开发 + 3 封存） | 待做（现有 3 个合成切片 + 2 个既有工程树；Gold Case 需用户/安全专家提供经批准的脱敏材料） |
+| 验收门③：提效 ≥30% 基线测量 | 待做（需与同一批准任务的人工流程对比计时，非纯代码工作） |
 | 接入既有工程（改真实工程而非副本） | P4 —— 前置是**真实**身份基础设施（当前信任根仍未接 SSO/HSM，见已知限制 12） |
 | GUI 内实际渲染的目视确认 | **需用户双击 `scripts\open-workcopy-gui.bat`**（沙箱 Session 0 隔离，看不到窗口） |
 

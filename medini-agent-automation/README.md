@@ -135,6 +135,27 @@ $PY -m medini_automation.cli apply-change <change_id> --approval-file att.json
 > 访问控制。`key-init` 刻意不代登记公钥 —— 否则能跑 CLI 的 Agent 就能一键把自己
 > 变成合法审批人。详见 `docs/API_EVIDENCE.md` § EV-APPROVAL-20260921。
 
+## 稳定性采样（验收门）
+
+对应规划验收指标「**每个获准流程连续 10 次运行无静默错误（覆盖至少 3 个模型快照）**」：
+
+```bash
+# 正式采样（需许可；3 快照 × 10 连跑 ≈ 8–10 分钟）
+python scripts/stability_sampling.py --runs 10
+
+# 干跑（免许可，只验证采样器本身的结构）
+python scripts/stability_sampling.py --runs 2 --dry
+```
+
+**静默错误的判定是四条明确定义，不是含糊的形容词**：①退出码 0 但 verdict≠pass
+②失败且无证据目录 ③verdict=pass 但 Q 相对误差与首次不一致（数值悄悄漂移）
+④reopen 四重校核任一不通过。报告在 `runs/stability/<时间戳>/summary.json`，
+按规划 L210 公布分母、失败与不支持项，不只展示成功作业。
+
+三个快照的结构形态互异：`abc`（重复事件 + AND/OR 嵌套）、`or_save`（纯 OR 扁平）、
+`vote`（VOTE 2/3 表决 + OR，`tests/fixtures/slice_vote.json`，独立参考 Q=42721/2500000
+经真值表穷举交叉确认）。
+
 ## 纪律红线（公共契约）
 
 1. medini 是唯一真实计算后端；Mock/合成结果必须标 synthetic
