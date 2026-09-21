@@ -181,3 +181,128 @@ java.lang.InterruptedException
   不等于「画布一定画出来」。人工确认入口：双击 `scripts\open-workcopy-gui.bat`
 - 图形为**自动树布局**（按深度分层、同层中心对齐），可读但非手工排布
 - 图登记后 medini **不自动刷新**：需重开工程或 F5
+
+## EV-AGENT-API-20260921 — 受控操作接口层（P2，实机九操作闭环）
+
+九操作唯一实现：`src/medini_automation/application/agent_api.py`。全部返回
+JSON-ready dict（不打印、不 `sys.exit`），策略性拒绝经 `@_guard` 统一转成结构化
+`{status:blocked, code, error, hint, recovery}`；真正的编程缺陷照常抛出（便于定位）。
+
+| 操作 | 是否需要许可 | 语义 |
+|---|---|---|
+| `get_capabilities` | 否 | 能力矩阵 + worker 自检（逐前置因子，不合并成一句 ready） |
+| `read_project` | 否 | 读工程现状 + **映射损失** + 原生漂移 |
+| `prepare_change` | 否 | 校验提案 + 生成 ChangeSet（**不动工程**） |
+| `apply_change` | 否 | 六重门禁后推进基线（**写 .fta 要 reopen_check**） |
+| `run_analysis` | 是 | 契约上算 Q/MCS（**不落盘**） |
+| `get_job` | 否 | 作业状态 + stage_notes |
+| `readback` | 否 | 回读校核 |
+| `export_evidence` | 否 | 证据包（文件清单 + 逐文件 SHA-256，`approval=null`） |
+| `reopen_check` | 是 | 保存/重开/回读四重校核；`publish=true` 联动 P1.5 出图 |
+
+### 三大约束（控制面，非识别基础设施）
+
+1. **受控 project_id 白名单** —— `default_projects()` 只把本仓工作副本标 `writable=True`；
+   既有工程 `SRC-F2244-C01` 标 `writable=False`，写入尝试返回 `PROJECT_READ_ONLY`
+   （实测：首次冒烟即触发，这正是设计意图）
+2. **基线哈希绑定** —— 首次 `prepare_change` 通过候选校验后建立 v1 语义哈希基线
+   （放在校验之后，保证被拒提案不留半成品基线）；此后每次变更/分析必须带
+   `expected_baseline_hash`。缺哈希 → `BASELINE_HASH_REQUIRED`（hint 直接给出当前值）；
+   不匹配 → `BASELINE_MISMATCH`
+3. **审批门禁** —— `apply_change` 六重门禁：状态 → 审批存在 → 审批字段齐全 →
+   `ChangeSet.validate_for_apply()`（scope 绑定）→ `patch_hash` 防篡改 → 基线二次核对。
+   只认受信任身份层签发的 `ApprovalRef`；**Agent 传 `approved=true` 不是凭证**。
+   CLI 侧刻意不提供 `--approver` / `--fingerprint` 便利开关（避免让「Agent 自批」变容易）
+
+### 实机闭环（2026-09-21，全绿）
+
+```
+read_project   → 漂移 A: 0.1 → 1/4
+run_analysis   → Q=0.11（参考 11/100，rel 5.05e-18）、MCS {AB, AC} 一致、
+                 job 519242f660a2、duration 7.46s
+get_job        → verified + 6 条 stage_notes
+readback       → 6/6 checks 全 true
+export_evidence→ 8 文件 + 逐文件 SHA-256，approval=null
+reopen_check(publish=True) → 四重校核全绿（Q0==Q1==0.11、磁盘 SHA-256 一致、
+                 registration: updated）
+                 → native_drift: []   ← 漂移归零
+```
+
+### 映射损失（`_mapping_loss`）—— 逐条实测，非推测
+
+`.fta` 原生与规范化契约的表达差异，每条都能在真实文件里对上：
+
+| # | 差异 | 依据 |
+|---|---|---|
+| 1 | 事件计数语义不同：原生 `<events>` 含**门输出被建模成 Event** | abc 原生 6 条 vs 契约 3 条（仅基本事件） |
+| 2 | 原生 `<gates>` **省略默认 kind**（medini 语义 = AND） | `G_AB` / `G_AC`；契约必须显式写 type，回写需补默认值 |
+| 3 | `rawProbability` 是有限位十进制串，契约用精确有理数 | 来源精度 < 12 位有效数字时重导出可能舍入差异 |
+| 4 | 共享基本事件：原生一条 `<events>` 挂多个 `<eventNodes>` | A 挂 2 个；契约用重复引用表达共享 |
+| 5 | `eventNodes` 的 occurrence 计数在契约中无对应字段 | 可视化/实例语义 |
+| 6 | `TransferGate` 在契约中不可表示 | 仅当原生含传递门时出现 |
+| 7 | `xmi:id` / `mediniIdentifier` 由 medini 导入时分配，**重新导入会变** | 不能作稳定标识；稳定标识是契约逻辑 id |
+
+### 原生漂移（`_native_drift`）—— 精确有理数比对
+
+`apply_change` 只推进**契约基线**，磁盘上的 `.fta` 要等 `reopen_check` 才落盘。
+中间态必须显式暴露：`read_project` / `run_analysis` 会比较原生 `rawProbability`
+与基线概率，不一致即写入 `native_drift`。比对用 **`Fraction` 精确有理数而非浮点**，
+避免 0.3 被浮点误差误判漂移。`next_action` 给可操作指引（明示「落盘的是
+`reopen_check` 而不是 `run_analysis`」）。
+
+**本仓实现**：`application/agent_api.py`；CLI 四子命令 `read-project` /
+`prepare-change` / `apply-change` / `export-evidence`（`capabilities` 改为委托
+`agent_api.get_capabilities`，消除两份能力输出分叉）；单测
+`tests/unit/test_agent_api.py`（隔离 fixture 用 `monkeypatch.setattr` 换
+`PROJECTS` / `STATE_ROOT` / `MEDINI_EXE_DEFAULT`）。
+
+## EV-MCP-DSH-20260921 — DSH 接入（MCP stdio server）
+
+`integrations/dsh/server.py` 零业务逻辑，9 个 `@mcp.tool()` 转发到 `agent_api`。
+工具名严格等于规划名：`medini_get_capabilities` / `medini_read_project` /
+`medini_prepare_change` / `medini_apply_change` / `medini_run_analysis` /
+`medini_get_job` / `medini_readback` / `medini_export_evidence` /
+`medini_reopen_check`。统一信封：成功 `{"ok":true,"result":{...}}`；失败
+`{"ok":false,"error":{code,message,hint,recovery}}`。
+
+### 两个真实隐患（均已修，有实测依据）
+
+| 隐患 | 现象 | 修法 |
+|---|---|---|
+| FastMCP 往 **stderr** 打 INFO 日志 | 首次冒烟 `stderr(324B): INFO Processing request of type ListToolsRequest` | `FastMCP("medini-auto", log_level="ERROR")`；复验 `stderr: 空`。**stdio 传输下 stderr 是没人消费的管道，写满 64KB 缓冲区会阻塞协议流** |
+| 子进程**继承 stdin** | `run_headless` 的 `subprocess.run` 未设 stdin → 继承 MCP server 的 JSON-RPC 读管道 | `stdin=subprocess.DEVNULL` + 注释留证。同类实测教训：StarCCMAgent 进程探测因此随机阻塞 40–110s |
+
+### DSH 配置手术的三条硬约束（`patch_dsh.py` 护栏）
+
+1. **insert ≠ override** —— 新增 MCP 必须写成 `- insert:` 条目；只带 `id` 不带 `insert`
+   的是 override，id 不存在时 **warn-and-skip（不报错、静默不生效）**
+2. **多 profile 必须同步** —— `web` 与 `tui` 的 `cordis.patch.yml` 是独立文件，只写一份
+   = 某个界面里看不到该 MCP
+3. **YAML 硬约束** —— 既有 patch 为**无 BOM + 纯 LF**（`read_text` 对 BOM / CRLF 直接
+   抛错拒绝改写）；Windows 路径必须用 YAML **单引号**（双引号里 `\U`/`\M` 是非法转义）；
+   `!!js` 标签必需正斜杠且不能带反引号
+
+### 已证（不耗模型额度）
+
+- 两 profile patch 写入后 `dsh --profile web --dump-config` 显示 `medini-auto` 被
+  **正确合成进插件树**（web 第 850 行 / tui 第 679 行 `serverName: medini-auto`）；
+  web 共 18、tui 共 17 个 `dsh-mcp-client` 实例；**无任何 medini-auto 相关警告**
+  （tui 唯一警告 `tool-str-replace-editor not found` 是既有且无关）→ 证明是 insert
+  被消费，而非 warn-and-skip
+- 真实 **stdio 子进程冒烟**（`verify.py`，已纳入测试套件回归）：严格握手
+  （`initialize` → 等响应 → `initialized` + `tools/list` → 等响应），9 工具**精确相等**、
+  `tools/call` 返回 `ok=true`、`exit=0`、`stderr` 为空
+- **cwd 独立性**：冒烟刻意用 `cwd=Path.home()`（不相关目录）启动，仍 9 工具全通
+  → 不依赖 cwd
+- 备份留在原地：`D:\dsh\home\profiles\{web,tui}\cordis.patch.yml.bak-20260921-195451`
+
+### 诚实边界（未验证项）
+
+- **「DSH 会话内发起一次真实工具调用」未验证**。实测撞智谱 Coding Plan 5 小时额度上限：
+  `dsh: RATE_LIMIT: 429: {"code":"1308",...限额将在 2026-09-21 22:25:06 重置}`。
+  替代验证走 `--dump-config`（合成 profile 树但不启模型）。因此能力矩阵中
+  `medini.mcp_dsh_bridge` 只标 **partial**
+- `apply_change` 的审批门禁是**控制面机制**，不是身份基础设施（真身份层不在本仓职责内）
+- `patch_dsh.py` 经 Bash 执行 + 单测验证；`.ps1` 仅为薄壳（本会话 PowerShell 工具无输出，
+  故文件手术下沉到 Python 核心，`install.ps1` 缩到可肉眼审）
+

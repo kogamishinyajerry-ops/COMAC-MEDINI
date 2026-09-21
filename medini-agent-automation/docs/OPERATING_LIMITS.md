@@ -45,3 +45,33 @@
 - 图形为自动树布局，非手工排布；登记后需重开工程或 F5 才刷新
 - GUI 画树若报 license 缺失，需 `medini_analyze_cockpit` feature（当前许可池无）
 - PrintWindow 截图可跨会话，SendInput/SetForegroundWindow 不可
+
+## 受控操作接口层与 DSH 接入（P2，2026-09-21）
+
+### 已支持
+
+- 九操作受控接口（`agent_api.py`）：能力 / 读工程 / 备变更 / 应用变更 / 跑分析 /
+  查作业 / 回读 / 导证据 / 重开校核；全部返回结构化 JSON，不打印、不 `sys.exit`
+- 受控工程白名单：**只有本仓工作副本 `workcopy/AUTO-WC` 可写**；既有工程
+  `SRC-F2244-C01` 标只读，写入返回 `PROJECT_READ_ONLY`（不是崩溃）
+- 基线语义哈希绑定：缺 `expected_baseline_hash` → `BASELINE_HASH_REQUIRED`（hint 给当前值）；
+  不匹配 → `BASELINE_MISMATCH`
+- 审批门禁六重：状态 → 审批存在 → 字段齐全 → scope 绑定 → `patch_hash` 防篡改 → 基线二次核对
+- MCP stdio server（`integrations/dsh/server.py`）：9 工具，统一信封
+  `{ok:true,result}` / `{ok:false,error:{code,message,hint,recovery}}`
+- DSH 配置手术（`patch_dsh.py`）：幂等安装/卸载，双 profile 同步，BOM/CRLF 护栏，自动备份
+
+### 明确边界（不承诺）
+
+- **审批门禁是控制面机制，不是身份基础设施** —— 只做「必须存在受信任身份层签发的
+  `ApprovalRef`」这个约束，真身份层不在本仓职责内（P3 才接）
+- **`apply_change` 只推进契约基线**，磁盘 `.fta` 要等 `reopen_check` 才落盘 ——
+  中间态由 `native_drift` 显式暴露，不静默
+- **`medini.mcp_dsh_bridge` 只标 partial**：「DSH 会话内真实工具调用」未验证
+  （撞 Coding Plan 5 小时额度上限）。已证的是配置被正确合成 + server 通过严格 stdio 冒烟
+- **stdio 传输禁止往 stderr 写日志** —— 无人消费的管道写满 64KB 会阻塞协议流；
+  server 已设 `log_level="ERROR"`，改动此参数前请先读 `API_EVIDENCE.md`
+- **MCP server 内的子进程必须 `stdin=DEVNULL`** —— 否则继承 JSON-RPC 读管道，
+  子进程会随机阻塞数十秒
+- DSH 侧三条硬约束（insert 非 override / 多 profile 同步 / 无 BOM+纯 LF）不可绕过，
+  详见 `integrations/dsh/README.md`

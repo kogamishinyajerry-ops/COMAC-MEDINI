@@ -60,6 +60,44 @@ python -m medini_automation.cli verify-diagram workcopy/AUTO-WC --case abc  # �
 `IllegalValueException`）；边 `source` = 视觉在下、`target` = 视觉在上。
 详见 `docs/API_EVIDENCE.md` § EV-DIAGRAM-20260921。
 
+## 受控操作接口层与 DSH 接入（P2）
+
+`application/agent_api.py` 是九个受控操作的唯一实现（CLI 与 MCP 调的是同一批函数）：
+
+| 操作 | 需要许可 |
+|---|---|
+| `get_capabilities` / `read_project` / `prepare_change` / `apply_change` / `get_job` / `readback` / `export_evidence` | 否 |
+| `run_analysis` / `reopen_check`（唯一落盘 `.fta` 的操作） | 是 |
+
+三大约束：**受控 project_id 白名单**（只有 `workcopy/AUTO-WC` 可写，既有工程
+`PROJECT_READ_ONLY`）、**基线语义哈希绑定**、**审批门禁**（只认受信任身份层签发的
+`ApprovalRef` —— Agent 传 `approved=true` 不是凭证）。
+
+```bash
+PY="C:/Users/Kogami/.workbuddy/binaries/python/envs/default/Scripts/python.exe"
+
+$PY -m medini_automation.cli capabilities                          # 能力矩阵 + worker 自检
+$PY -m medini_automation.cli read-project workcopy/AUTO-WC --case abc
+$PY -m medini_automation.cli prepare-change --case abc --contract tests/fixtures/slice_abc.json
+$PY -m medini_automation.cli apply-change --change-id <id> --approval approval.json
+$PY -m medini_automation.cli export-evidence --job-id <job_id>
+```
+
+接入 DSH（两个 profile 同时写，含 stdio 冒烟验证）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File integrations\dsh\install.ps1 -DryRun   # 先干跑
+powershell -ExecutionPolicy Bypass -File integrations\dsh\install.ps1 -Backup  # 正式接入
+```
+
+生效后 DSH 里出现 `mcp__medini-auto__medini_*` 共 9 个工具。**三个必须记住的
+DSH 事实**（insert 非 override / 多 profile 同步 / `serverName` 唯一）与完整调用链
+见 [`integrations/dsh/README.md`](integrations/dsh/README.md)。
+
+> 当前 `medini.mcp_dsh_bridge` 状态为 **partial**：配置被 DSH 正确合成与 server 的
+> 严格 stdio 冒烟均已验证，但「DSH 会话内发起一次真实工具调用」尚未验证
+> （撞额度上限）。见 `docs/API_EVIDENCE.md` § EV-MCP-DSH-20260921。
+
 ## 纪律红线（公共契约）
 
 1. medini 是唯一真实计算后端；Mock/合成结果必须标 synthetic

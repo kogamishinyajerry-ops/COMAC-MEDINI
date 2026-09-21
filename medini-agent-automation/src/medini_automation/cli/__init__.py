@@ -13,7 +13,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ..domain.capability import initial_capabilities
 from ..domain.model import ContractError, from_contract_json
 from .. import __version__
 
@@ -88,11 +87,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 # ---------------------------------------------------------- capabilities
 def cmd_capabilities(args: argparse.Namespace) -> int:
-    caps = [c.to_dict() for c in initial_capabilities(__version__)]
-    print(json.dumps(
-        {"adapter_version": __version__, "capabilities": caps},
-        ensure_ascii=False, indent=2))
-    return 0
+    """能力矩阵 + worker 自检（与 MCP 工具 medini_get_capabilities 同一实现）。
+
+    历史版本只回矩阵；现委托 ``application.agent_api.get_capabilities``，
+    输出为其超集（新增 status / worker_env / projects），不再维护第二份形状。
+    """
+    from ..application.agent_api import get_capabilities
+    res = get_capabilities(worker_id=getattr(args, "worker_id", None),
+                           required_version=getattr(args, "required_version", None))
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return _exit_for(res)
+
+
+def _exit_for(res: dict) -> int:
+    """agent_api 的 {ok, blocked, error} → 退出码 0 / 1 / 3。"""
+    return {"ok": 0, "blocked": 1}.get(str(res.get("status")), 3)
 
 
 # ---------------------------------------------------------------- validate
@@ -275,6 +284,80 @@ def cmd_verify_diagram(args: argparse.Namespace) -> int:
     return 0 if v == "pass" else (1 if v == "blocked" else 3)
 
 
+# ------------------------------------------------------- P2 受控操作接口
+# 以下四个子命令与 MCP 工具一一对应（read_project / prepare_change /
+# apply_change / export_evidence），实现层都是 application.agent_api，
+# 规划要求「先形成可脚本调用 CLI/服务，再封装工具，不重写 Harness」。
+def cmd_read_project(args: argparse.Namespace) -> int:
+    from ..application.agent_api import read_project
+    res = read_project(args.project, case=args.case)
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return _exit_for(res)
+
+
+def _load_json_arg(inline: str | None, path: str | None, what: str) -> object:
+    if path:
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"{what}: {p} 不存在")
+        return json.loads(p.read_text(encoding="utf-8"))
+    if inline:
+        return json.loads(inline)
+    raise ValueError(f"{what}: 需要 --{what} 或 --{what}-file")
+
+
+def cmd_prepare_change(args: argparse.Namespace) -> int:
+    from ..application.agent_api import prepare_change
+    try:
+        ops = _load_json_arg(args.ops, args.ops_file, "ops")
+    except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:
+        print(json.dumps({"status": "error", "code": "BAD_OPS_ARG",
+                          "error": str(e)}, ensure_ascii=False), file=sys.stderr)
+        return 2
+    if not isinstance(ops, list):
+        print(json.dumps({"status": "error", "code": "BAD_OPS_ARG",
+                          "error": "--ops 必须是 JSON 数组"},
+                         ensure_ascii=False), file=sys.stderr)
+        return 2
+    res = prepare_change(
+        args.project, args.case, ops,
+        expected_baseline_hash=args.baseline_hash,
+        contract_path=args.contract, reason=args.reason, source=args.source,
+        evidence_refs=args.evidence_ref or None)
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return _exit_for(res)
+
+
+def cmd_apply_change(args: argparse.Namespace) -> int:
+    """实施已批准变更。
+
+    审批只接受 JSON（或 JSON 文件），**不提供** --approver/--fingerprint 这类
+    便利开关——那会让「Agent 自批」变得太容易。审批引用必须来自受信任身份层。
+    """
+    from ..application.agent_api import apply_change
+    try:
+        approval = _load_json_arg(args.approval, args.approval_file, "approval")
+    except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:
+        print(json.dumps({"status": "error", "code": "BAD_APPROVAL_ARG",
+                          "error": str(e)}, ensure_ascii=False), file=sys.stderr)
+        return 2
+    if not isinstance(approval, dict):
+        print(json.dumps({"status": "error", "code": "BAD_APPROVAL_ARG",
+                          "error": "--approval 必须是 JSON 对象"},
+                         ensure_ascii=False), file=sys.stderr)
+        return 2
+    res = apply_change(args.change_id, approval=approval)
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return _exit_for(res)
+
+
+def cmd_export_evidence(args: argparse.Namespace) -> int:
+    from ..application.agent_api import export_evidence
+    res = export_evidence(args.job_id, out_root=Path(args.out) if args.out else None)
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return _exit_for(res)
+
+
 # ------------------------------------------------------------------- main
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
@@ -287,7 +370,11 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--medini-exe", default=None)
     d.set_defaults(func=cmd_doctor)
 
-    c = sub.add_parser("capabilities", help="按操作粒度的能力矩阵")
+    c = sub.add_parser("capabilities",
+                       help="能力矩阵 + worker 自检（= MCP medini_get_capabilities）")
+    c.add_argument("--worker-id", default=None)
+    c.add_argument("--required-version", default=None,
+                   help="逐项标注 version_match（不匹配=未在本机实测）")
     c.set_defaults(func=cmd_capabilities)
 
     v = sub.add_parser("validate", help="校验契约 JSON（静态FTA）")
@@ -343,6 +430,40 @@ def build_parser() -> argparse.ArgumentParser:
     vd.add_argument("--case", required=True)
     vd.add_argument("--out", default="runs")
     vd.set_defaults(func=cmd_verify_diagram)
+
+    rp = sub.add_parser("read-project",
+                        help="P2 只读快照：原生结构 + 基线 + ID 映射 + 映射损失")
+    rp.add_argument("project", help="受控 project_id（见 capabilities 的 projects）")
+    rp.add_argument("--case", default=None)
+    rp.set_defaults(func=cmd_read_project)
+
+    pc = sub.add_parser("prepare-change",
+                        help="P2 变更提案：校验 + diff + patch_hash（不写工程）")
+    pc.add_argument("project")
+    pc.add_argument("case")
+    pc.add_argument("--ops", default=None, help="操作数组 JSON")
+    pc.add_argument("--ops-file", default=None, help="操作数组 JSON 文件")
+    pc.add_argument("--baseline-hash", default=None,
+                    help="绑定的基线哈希；首次建立基线时省略")
+    pc.add_argument("--contract", default=None,
+                    help="建立初始基线用的契约 JSON（仅首次需要）")
+    pc.add_argument("--reason", default="")
+    pc.add_argument("--source", default="")
+    pc.add_argument("--evidence-ref", action="append", default=None)
+    pc.set_defaults(func=cmd_prepare_change)
+
+    ac = sub.add_parser("apply-change",
+                        help="P2 在副本实施已批准变更（只认受信任身份审批）")
+    ac.add_argument("change_id")
+    ac.add_argument("--approval", default=None, help="审批引用 JSON")
+    ac.add_argument("--approval-file", default=None, help="审批引用 JSON 文件")
+    ac.set_defaults(func=cmd_apply_change)
+
+    ee = sub.add_parser("export-evidence",
+                        help="P2 导出已校核作业的证据包（文件清单 + 逐文件哈希）")
+    ee.add_argument("job_id")
+    ee.add_argument("--out", default="runs")
+    ee.set_defaults(func=cmd_export_evidence)
     return ap
 
 

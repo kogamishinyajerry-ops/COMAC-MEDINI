@@ -72,9 +72,13 @@ def run_headless(
     ]
     t0 = time.time()
     try:
+        # stdin=DEVNULL 是必须的：本函数也被 MCP stdio server 调用，那时父进程的
+        # stdin 是 JSON-RPC 的读管道；子进程继承它会让 JVM/控制台探测随机阻塞
+        # （同类实测教训：StarCCMAgent 的进程探测因此卡 40-110s）。
+        # medini 从不读 stdin，断开无副作用。
         r = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout_s,
-            encoding="utf-8", errors="replace")
+            encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
         rc, so = r.returncode, r.stdout or ""
     except subprocess.TimeoutExpired as e:
         return CliResult(124, time.time() - t0, "TIMEOUT", expect_json, False)

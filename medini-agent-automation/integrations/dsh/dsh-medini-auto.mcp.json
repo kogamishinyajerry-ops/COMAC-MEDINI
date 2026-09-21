@@ -1,0 +1,12 @@
+{
+  "medini-auto": {
+    "command": "C:\\Users\\Kogami\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe",
+    "args": [
+      "D:\\COMAC MEDINI\\medini-agent-automation\\integrations\\dsh\\server.py"
+    ],
+    "env": {
+      "PYTHONIOENCODING": "utf-8"
+    },
+    "description": "medini-agent-automation P2 - 受控操作接口（能力自检/只读快照/变更提案/审批实施/实机分析/作业查询/回读校核/证据导出/保存重开四重校核）。工具名 mcp__medini-auto__medini_*，与 D:\\MediniAgent\\mcp 的 mcp__medini__* 相互独立。"
+  }
+}
