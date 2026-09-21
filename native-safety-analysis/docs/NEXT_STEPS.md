@@ -76,7 +76,7 @@
   - 认证层（身份系统替代 `--reviewer` 字符串）：**仍未做**，待外部裁决（见"需要外部裁决"表）
 
 - **对象级 patch 语言（B07 后半：`model-patch-v1`）** ✅
-  - 领域层 `domain/patch.py`：`apply_patch()` / `patch_preview()` 纯函数；八种操作按序应用（`set_event_probability`/`add_event`/`remove_event`/`set_gate`/`add_gate`/`remove_gate`/`set_top_event`/`set_condition`）
+  - 领域层 `domain/patch.py`：`apply_patch()` / `patch_preview()` 纯函数；九种操作按序应用（`set_event_probability`/`set_event_rate`/`add_event`/`remove_event`/`set_gate`/`add_gate`/`remove_gate`/`set_top_event`/`set_condition`）
   - **校验在规范形式层**（必须如此）：canonical 的 `p` 可为精确 `n/d`（`1/3`），宽于模型输入词法——重建文件无法合法表达；实质检查与 `validate_model` 等价（引用/全图无环含不可达部分/K_OF_N/双向语义守卫）
   - **概率走共享渲染器**：`"0.250"` ≡ `"0.25"`（同哈希）；`"1/3"` 精确保留
   - **patch 与等价全模型提案产出相同 `proposed_hash`**（收敛性，独立验证锁定）——两条入口不可能各自漂移
@@ -91,9 +91,8 @@
    - 若可行：固定 commit、独立进程调用、对照协议（同模型双向转换损失报告）
    - 若不可行：记录裁决，另选差分策略（如自建第二 BDD 变体 + 变量序扰动）
 
-2. **rate 编辑的 patch 语义**（`model-patch-v2` 候选）
-   - `set_event_rate` 操作：改 λ/t/单位后**重跑转换闸门**（恒定率/单位/精度）并重派生 p
-   - 需要自己的语义规格与转换验证（复用 `run_rate_cross_check` 的 oracle 思路）
+2. **新增 rate 事件的 patch 操作**（`add_event` 目前仅普通概率）
+   - 需要完整 rate 闸门 + 语义守卫（模型从纯概率变为混合时的双向检查）
    - 认证层接入，用身份系统替代 `--reviewer` 字符串 + 保留标识判断（见 VERIFICATION.md 待裁决项）
 
 3. **重要度增量重算（B03 收尾之二，先测再优化）**
@@ -102,6 +101,12 @@
    - ~~高 FV / 高 RAW 事件驱动 FMEA 关注项~~ ✅ `fmea propose-from-importance`
    - ~~影响范围分析 + 一等公民 revert~~ ✅ `review impact` / `review revert`
    - ~~对象级 patch 语言~~ ✅ `review patch` / `review patch-preview`
+
+- **`set_event_rate`：编辑既有 rate 事件（B07 后半之二）** ✅
+  - 九种操作之一：改 λ/t/单位后**完整重跑转换闸门**（`parse_rate_spec` 词法/单位/范围检查——**保留原始错误码** `RATE_VALUE`/`RATE_UNITS`/`RATE_UNSUPPORTED`/`SOURCE`）→ `q = 1−exp(−λt)` 按事件已记录精度重求值 → 重写 provenance 并**重派生 p**
+  - **独立验证**：patched q 对照纯有理级数 oracle（容差 1e-30，与 `run_rate_cross_check` 同口径）；**与模型级 λ/t 变更收敛于同一哈希**
+  - 精度继承：沿用事件已记录的 `precision_digits`（patch 不提供改精度的入口——改精度是模型级决定）
+  - 边界：只编辑**既有** rate 事件；普通概率事件不接受（不提供普通→rate 转换方向）；**新增** rate 事件仍待真实需要
 
 ## 需要外部裁决的事项（不擅自决定）
 

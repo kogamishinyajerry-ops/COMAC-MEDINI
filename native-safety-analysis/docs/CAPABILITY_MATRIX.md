@@ -19,7 +19,7 @@
 | repair / dormancy / CCF models | 显式拒绝 | verified（repairable/dormant/latent/inspection 各拒绝路径） | — | tests/test_rate_model.py | RATE_UNSUPPORTED，不静默退化 |
 | **local_baseline_run_store** | implemented | **verified**（52 次 run 用 2ⁿ oracle 重推导库内数值，1362 项**精确相等无容差**；55 份基线规范形式独立重哈希；4615 值 SQLite `typeof()` 扫描零 REAL；往返 dump==restore；**10/10 突变被检出**；**9 类拒绝码实测**含 revert 守卫） | 未执行 | tests/test_store.py, tests/test_change_mgmt.py, verification/run_store_verification.py | 单写者 + 乐观并发；基线不可就地改写；存储层不授予批准权 |
 | change_mgmt_impact_and_revert | implemented | **verified**（impact diff 两侧均取自库内行、词法噪音免疫、order_only 标注；revert 从基线表自建提案、目标重哈希锚定、仍走两步人类批准；stale 双向重派生；applied review 锚定基线重哈希检查；**REVERT_TARGET 守卫实测**） | 未执行 | tests/test_change_mgmt.py, verification/run_store_verification.py | revert 只能回到**本库持有过**的基线；无 `--assume-yes`；认证层未接入（`--reviewer` 字符串 + 保留标识判断） |
-| object_level_patch_language | implemented | **verified**（40 项专项测试 + 状态机契约：八种操作按序应用、纯函数、**与等价全模型提案同哈希**（收敛）、rate p 不可直设、被引用不可删、跨操作环与不可达环被拒、非法记 invalid、`1/3` 精确保留） | 未执行 | tests/test_patch.py, verification/run_store_verification.py | `model-patch-v1`：作用于库内当前基线的规范形式，产出普通提案；`add_event` 仅普通概率（加 rate 事件待需要）；无移动/重命名；**编辑 rate 记录未实现**（需独立语义规格） |
+| object_level_patch_language | implemented | **verified**（47 项专项测试 + 状态机契约：九种操作按序应用、纯函数、**与等价全模型提案同哈希**（收敛，含 rate 编辑）、rate p 不可直设、**`set_event_rate` 完整重跑转换闸门且 q 对照独立 oracle（1e-30）**、被引用不可删、跨操作环与不可达环被拒、非法记 invalid、`1/3` 精确保留） | 未执行 | tests/test_patch.py, verification/run_store_verification.py | `model-patch-v1`：作用于库内当前基线的规范形式，产出普通提案；`set_event_rate` 仅编辑既有 rate 事件（不提供普通→rate 转换）；`add_event` 仅普通概率（**新增** rate 事件待需要）；无移动/重命名 |
 | FMEA / requirements traceability | implemented | **verified**（15 当前行 + 2 被取代行**全部由原始列独立重建规范形式并重哈希**；34 条关联逐条解析（26 命中 / 8 悬空如实报告）；多对多双向证明（8 事件被 >1 行引用、12 行引用 >1 事件）；20 个候选全生命周期审计；115 个存储值 `typeof()` 扫描零 REAL；8 类拒绝码实测；**20/20 突变被检出**） | 未执行 | tests/test_fmea.py, verification/run_fmea_verification.py | 单表 + 关联表 + 候选表；**不含**严重度/发生度/探测度/RPN（FMECA 不在范围）；推断行（`source=inference`）必须写 `inference_note` 且**永远不能自动进入正式表**；关联悬空只报告与计数、**不判为完整性失败**；已批准内容不可就地改写，修订必产生新版本 |
 | fmea_attention_from_importance | implemented | **verified**（关注项生成器幂等性/覆盖跳过/精确 `min-value`/未定义度量跳过/过期基线拒绝/带标记行批准后仍拒绝晋升，6 类拒绝路径实测；正式表零写入） | 未执行 | tests/test_fmea.py, verification/run_fmea_verification.py | 只产出**工作项**：四个描述字段带 `[UNCONFIRMED]`、组件/功能为 `*-UNASSIGNED`，**引擎不撰写 FMEA 内容**；带标记的行永远无法入表（`FMEA_PLACEHOLDER`）；仅支持单个模型当前基线上的 run |
 | web workbench | 未实现 | — | — | docs/NEXT_STEPS.md | 第二阶段 |
@@ -31,7 +31,7 @@
 本版本为**研究样机 + 方法可用候选**：
 - 可声明：对契约 0.1.0/0.2.0 范围内的相干静态 FTA 模型独立完成确定性精确计算（含恒定失效率→任务概率的一次受控舍入转换），给出精确的 Birnbaum / Fussell–Vesely / RAW / RRW 重要度，并在本地库中按语义哈希锚定基线、保留旧版证据、把变更走"提案→批准→应用"闭环
 - 可声明：维护一张与基本事件**多对多关联**的 FMEA 基础表，按 `fmea-canonical-v1` 精确重哈希，区分人工/推断/导入来源，并把推断行的确认要求与人工批准绑定到具体基线与内容
-- 可声明：对提案给出**结构化影响范围分析**（事件/门/假设/顶事件的增删改，两侧均取自库内行），提供**一等公民 revert**（从库内基线自建提案，仍走两步人类批准，stale 双向重派生）与**对象级 patch 语言**（八种编辑操作，作用于库内规范形式，与整份模型提案收敛于同一哈希）
+- 可声明：对提案给出**结构化影响范围分析**（事件/门/假设/顶事件的增删改，两侧均取自库内行），提供**一等公民 revert**（从库内基线自建提案，仍走两步人类批准，stale 双向重派生）与**对象级 patch 语言**（九种编辑操作，作用于库内规范形式，与整份模型提案收敛于同一哈希；rate 编辑重跑转换闸门并对照独立 oracle）
 - 可声明：按重要度排序**指出哪些事件值得做 FMEA**（给出精确度量值、排名与 run/基线来源），并生成带标记的**工作项草稿**
 - 不可声明：由引擎**撰写** FMEA 内容（失效模式/原因/影响）——关注项的描述字段永远是占位符，带标记的行无法入表
 - 不可声明：替代 Medini、DO-330/TQL 任何等级、适航认可、正式安全结论；亦不可把 q 当作 per-flight-hour 指标；重要度数值本身不构成任何设计变更批准

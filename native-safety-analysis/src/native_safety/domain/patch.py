@@ -18,12 +18,11 @@ Why canonical-level validation instead of rebuilding a model file:
 
 Deliberate v1 boundaries:
   * operations apply IN ORDER; each sees the previous one's result;
-  * a rate event's `p` is DERIVED from its lambda*t record, so
-    `set_event_probability` refuses to touch it — editing the rate is a
-    different operation and is not offered until it has its own semantics;
-  * `add_event` adds a plain-probability event only; adding a rate event
-    carries the full rate gate (units, mission time, precision) and is
-    excluded until needed for real;
+  * `set_event_rate` edits an EXISTING rate event's record through the full
+    conversion gate (parse -> q -> provenance); `set_event_probability`
+    refuses rate events (their p is derived), and adding a NEW rate event is
+    a separate, unimplemented operation — it must carry the whole rate gate;
+  * `add_event` adds a plain-probability event only;
   * nothing here decides acceptability — approval stays with a named human.
 """
 from __future__ import annotations
@@ -34,12 +33,19 @@ from . import errors
 from .errors import ModelError
 from .model import GATE_KINDS, ID_PATTERN
 from .model_diff import change_summary, diff_canonical_forms
+from .rate_model import (
+    DEFAULT_PRECISION_DIGITS,
+    mission_probability,
+    parse_rate_spec,
+    rate_provenance,
+)
 from .ratnum import exact_decimal_or_fraction
 
 PATCH_VERSION = "model-patch-v1"
 
 OPERATIONS = (
     "set_event_probability",
+    "set_event_rate",
     "add_event",
     "remove_event",
     "set_gate",
@@ -97,6 +103,38 @@ def patch_preview(canonical: dict, ops: list) -> dict:
 # --------------------------------------------------------------------------
 # individual operations
 # --------------------------------------------------------------------------
+
+
+def _op_set_event_rate(form: dict, op: dict, tag: str) -> None:
+    """Edit the rate record of an EXISTING rate event; p re-derives from it.
+
+    The full conversion gate re-runs: lexical/unit/range checks via
+    parse_rate_spec, then q = 1-exp(-lambda*t) at the event's recorded
+    precision, then a fresh provenance record. The patched form therefore
+    carries the same guarantees as a rate event that arrived through model
+    validation — there is no shortcut around the transcendental conversion.
+    """
+    event_id = op.get("event")
+    _require_id(event_id, f"{tag}.event")
+    raw = op.get("rate")
+    if not isinstance(raw, dict):
+        raise ModelError(errors.PATCH_OP, f"{tag}: rate must be an object (a failure_rate spec)")
+    for event in form["basic_events"]:
+        if event["id"] == event_id:
+            if "rate" not in event:
+                raise ModelError(
+                    errors.PATCH_OP,
+                    f"{tag}: event {event_id!r} is a plain-probability event; use "
+                    "set_event_probability (converting a plain event to a rate event is not "
+                    "offered — add_event with a rate is a separate, unimplemented operation)",
+                )
+            spec = parse_rate_spec(raw, event_id)
+            precision = int(event["rate"].get("precision_digits") or DEFAULT_PRECISION_DIGITS)
+            q = mission_probability(spec, precision)
+            event["rate"] = rate_provenance(spec, q, precision)
+            event["p"] = exact_decimal_or_fraction(q)
+            return
+    raise ModelError(errors.PATCH_OP, f"{tag}: no basic event {event_id!r}")
 
 
 def _op_set_event_probability(form: dict, op: dict, tag: str) -> None:
@@ -229,6 +267,7 @@ def _op_set_condition(form: dict, op: dict, tag: str) -> None:
 
 _HANDLERS = {
     "set_event_probability": _op_set_event_probability,
+    "set_event_rate": _op_set_event_rate,
     "add_event": _op_add_event,
     "remove_event": _op_remove_event,
     "set_gate": _op_set_gate,

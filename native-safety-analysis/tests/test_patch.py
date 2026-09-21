@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -154,7 +155,7 @@ def test_an_unreachable_cycle_is_rejected_too(form):
 
 
 def test_rate_events_refuse_direct_probability_edits():
-    model = load_model(EXAMPLES.parent.parent.parent / "examples" / "R01_rate_and.json")
+    model = load_model(ROOT / "examples" / "R01_rate_and.json")
     form = canonical_model_form(model)
     rate_event = next(e["id"] for e in form["basic_events"] if "rate" in e)
     with pytest.raises(ModelError) as caught:
@@ -163,8 +164,128 @@ def test_rate_events_refuse_direct_probability_edits():
     assert "rate-derived" in caught.value.message
 
 
+# --------------------------------------------------------------------------
+# set_event_rate: editing a rate record through the full conversion gate
+# --------------------------------------------------------------------------
+
+RATE_FORM = None  # populated lazily; keeps the import-time cost out of collection
+
+
+def _rate_form():
+    global RATE_FORM
+    if RATE_FORM is None:
+        model = load_model(ROOT / "examples" / "R01_rate_and.json")
+        RATE_FORM = canonical_model_form(model)
+    return json.loads(json.dumps(RATE_FORM, ensure_ascii=False))
+
+
+def _new_rate(lambda_text, mission_text, *, source="derating per vendor rev B"):
+    return {
+        "model": "constant_failure_rate", "lambda": lambda_text, "lambda_unit": "1/h",
+        "mission_time": mission_text, "mission_time_unit": "h",
+        "repairable": False, "source": source,
+    }
+
+
+def test_set_event_rate_rederives_p_and_provenance():
+    patched = apply_patch(_rate_form(), [
+        {"op": "set_event_rate", "event": "P1", "rate": _new_rate("5e-6", "2000")},
+    ])
+    event = [e for e in patched["basic_events"] if e["id"] == "P1"][0]
+    assert event["rate"]["lambda"] == "5e-6"
+    assert event["rate"]["mission_time"] == "2000"
+    assert event["rate"]["lambda_t"] == "0.01"  # exact lambda*t
+    # provenance fields that ride along (the spec's own source string is not
+    # part of the canonical provenance record; precision and units are)
+    assert event["rate"]["precision_digits"] == 40  # inherited from the event's record
+    assert event["p"].startswith("0.0099501662")  # 1-exp(-0.01)
+
+
+def test_set_event_rate_matches_the_independent_oracle():
+    """q must agree with the pure-rational series oracle within the declared
+    1e-30 tolerance — the same contract run_rate_cross_check enforces."""
+    sys.path.insert(0, str(ROOT / "verification"))
+    from run_rate_cross_check import oracle_q
+
+    for lam, t in [("5e-6", "2000"), ("2e-5", "10000"), ("1e-4", "50")]:
+        patched = apply_patch(_rate_form(), [
+            {"op": "set_event_rate", "event": "P1", "rate": _new_rate(lam, t)},
+        ])
+        event = [e for e in patched["basic_events"] if e["id"] == "P1"][0]
+        reference = oracle_q(Fraction(lam), Fraction(t))
+        assert abs(Fraction(event["p"]) - reference) < Fraction(1, 10**30)
+
+
+def test_set_event_rate_reruns_the_whole_conversion_gate():
+    # the gate re-runs with its OWN error taxonomy: a bad rate spec surfaces
+    # the underlying rate codes (RATE_VALUE / RATE_UNITS / RATE_UNSUPPORTED /
+    # SOURCE), which classify the reason instead of flattening it to PATCH_OP
+    for bad_rate, why, expected_code in [
+        (_new_rate("-1e-6", "1"), "negative lambda", "RATE_VALUE"),
+        (_new_rate("1e-6", "-1"), "negative mission time", "RATE_VALUE"),
+        (dict(_new_rate("1e-6", "1"), lambda_unit="1/s"), "bad lambda unit", "RATE_UNITS"),
+        (dict(_new_rate("1e-6", "1"), mission_time_unit="s"), "bad time unit", "RATE_UNITS"),
+        (dict(_new_rate("1e-6", "1"), repairable=True), "repairable", "RATE_UNSUPPORTED"),
+        (dict(_new_rate("1e-6", "1"), model="weibull"), "unsupported model", "RATE_UNSUPPORTED"),
+        (dict(_new_rate("1e-6", "1"), inspection_interval="100"), "forbidden field", "RATE_UNSUPPORTED"),
+        ({**_new_rate("1e-6", "1"), "source": ""}, "blank source", "SOURCE"),
+    ]:
+        with pytest.raises(ModelError) as caught:
+            apply_patch(_rate_form(), [{"op": "set_event_rate", "event": "P1", "rate": bad_rate}])
+        assert caught.value.code == expected_code, f"{why}: {caught.value.code}"
+
+
+def test_set_event_rate_refuses_a_plain_event():
+    model = load_model(EXAMPLES / "M03_repeated_event.json")
+    form = canonical_model_form(model)
+    with pytest.raises(ModelError) as caught:
+        apply_patch(form, [{"op": "set_event_rate", "event": "A", "rate": _new_rate("1e-6", "1")}])
+    assert caught.value.code == err.PATCH_OP
+    assert "plain-probability" in caught.value.message
+
+
+def test_set_event_rate_on_an_unknown_event_is_rejected():
+    with pytest.raises(ModelError) as caught:
+        apply_patch(_rate_form(), [{"op": "set_event_rate", "event": "NOPE", "rate": _new_rate("1e-6", "1")}])
+    assert caught.value.code == err.PATCH_OP
+
+
+def test_a_rate_edit_is_visible_in_the_diff_and_reversible():
+    form = _rate_form()
+    ops = [{"op": "set_event_rate", "event": "P1", "rate": _new_rate("5e-6", "2000")}]
+    preview = patch_preview(form, ops)
+    assert preview["summary"]["events_changed"] == 1
+    changed = preview["diff"]["events"]["changed"][0]
+    assert changed["id"] == "P1"
+    assert "rate" in changed["new"]  # the diff fingerprints the rate record too
+    # applying the same edit twice is idempotent at the form level (same hash)
+    once = apply_patch(form, ops)
+    twice = apply_patch(once, ops)
+    assert hash_canonical_form(once) == hash_canonical_form(twice)
+
+
+def test_a_rate_edit_converges_with_a_full_rate_model_change():
+    """The same λ/t change via patch and via a rebuilt rate model file must
+    produce the same canonical hash — the convergence contract extended to
+    rate edits."""
+    form = _rate_form()
+    patched = apply_patch(form, [
+        {"op": "set_event_rate", "event": "P1", "rate": _new_rate("5e-6", "2000")},
+    ])
+    raw = json.loads((ROOT / "examples" / "R01_rate_and.json").read_text(encoding="utf-8"))
+    raw["basic_events"][0]["failure_rate"]["lambda"] = "5e-6"
+    raw["basic_events"][0]["failure_rate"]["mission_time"] = "2000"
+    via_model = canonical_model_form(load_model_from_dict(raw))
+    assert hash_canonical_form(patched) == hash_canonical_form(via_model)
+
+
+def load_model_from_dict(data):
+    from native_safety.domain.validation import validate_model
+    return validate_model(data)
+
+
 def test_removing_the_last_rate_event_breaks_the_semantics_guard():
-    model = load_model(EXAMPLES.parent.parent.parent / "examples" / "R01_rate_and.json")
+    model = load_model(ROOT / "examples" / "R01_rate_and.json")
     form = canonical_model_form(model)
     # R01 is all rate events: add a plain event, rewire every gate input to it,
     # then remove the rate events — the two-way semantics guard must fire

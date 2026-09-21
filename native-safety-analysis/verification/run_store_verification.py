@@ -657,6 +657,47 @@ def verify_state_machine(tmp: Path) -> Path:
             fail("state: an invalid patch was not recorded as invalid with PATCH_OP")
         COVERAGE["patch_proposals"] += 1
 
+        # -- rate editing through the patch: the conversion gate must re-run.
+        # The rate model R01 is recorded via a full model file; a set_event_rate
+        # patch on it must converge with an equivalent model-level λ/t change
+        # (same hash) and its q must match the independent oracle.
+        from run_rate_cross_check import oracle_q
+
+        rate_raw = json.loads((models.parent.parent.parent / "examples" / "R01_rate_and.json").read_text(encoding="utf-8"))
+        rate_model = validate_model(rate_raw)
+        rate_solution = solve_model(rate_model)
+        repo.record_run(
+            run_id="RATE-1", model=rate_model, solution=rate_solution,
+            payload=run_payload(rate_model, rate_solution, "RATE-1"), actor="JerryKogami",
+        )
+        rate_patch = repo.patch_review(
+            review_id="POP-P3", model_id=rate_model.model_id,
+            expected_baseline_hash=repo.current_baseline_hash(rate_model.model_id),
+            ops=[{
+                "op": "set_event_rate", "event": "P1",
+                "rate": {
+                    "model": "constant_failure_rate", "lambda": "5e-6", "lambda_unit": "1/h",
+                    "mission_time": "2000", "mission_time_unit": "h",
+                    "repairable": False, "source": "verifier derating",
+                },
+            }],
+            proposed_by="agent",
+        )
+        if rate_patch["state"] != "proposed":
+            fail(f"state: a valid rate patch was not proposed ({rate_patch['validation_code']})")
+        patched_canonical = json.loads(rate_patch["proposed_canonical_json"])
+        patched_event = next(e for e in patched_canonical["basic_events"] if e["id"] == "P1")
+        reference = oracle_q(Fraction("5e-6"), Fraction("2000"))
+        if abs(Fraction(patched_event["p"]) - reference) >= Fraction(1, 10**30):
+            fail("state: a patched rate probability does not match the independent oracle")
+        equivalent_rate = json.loads(json.dumps(rate_raw))
+        equivalent_rate["basic_events"][0]["failure_rate"]["lambda"] = "5e-6"
+        equivalent_rate["basic_events"][0]["failure_rate"]["mission_time"] = "2000"
+        if rate_patch["proposed_hash"] != semantic_model_hash(validate_model(equivalent_rate)):
+            fail("state: rate patch and model-level rate change hash differently (convergence broken)")
+        COVERAGE["patch_proposals"] += 1
+        COVERAGE["rate_edits"] = COVERAGE.get("rate_edits", 0) + 1
+
         # the store's own integrity pass
         problems = repo.verify()
         for problem in problems:
@@ -900,7 +941,7 @@ def main() -> int:
     print(f"  reverts applied       : {COVERAGE['reverts_applied']} "
           f"(stale re-derived in BOTH directions)")
     print(f"  patch proposals       : {COVERAGE['patch_proposals']} "
-          f"(one applied, one recorded invalid)")
+          f"(incl. {COVERAGE.get('rate_edits', 0)} rate edit[s] checked against the oracle)")
     print(f"  refusals triggered    : "
           + ", ".join(f"{code}x{n}" for code, n in sorted(COVERAGE["refusals"].items())))
     print(f"  population problems   : {population_problems}")
@@ -928,6 +969,9 @@ def main() -> int:
         return 1
     if "REVERT_TARGET" not in COVERAGE["refusals"]:
         print("\nVACUOUS: the revert guards were never exercised")
+        return 1
+    if COVERAGE.get("rate_edits", 0) == 0:
+        print("\nVACUOUS: the rate-edit patch path was never exercised against the oracle")
         return 1
     print("\nstore verification: PASSED")
     return 0

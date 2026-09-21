@@ -55,6 +55,10 @@ python run.py review decide store.sqlite P1 --approve --reviewer <human>   # 之
 # [{"op":"set_event_probability","event":"A","probability":"0.25"},
 #  {"op":"add_event","event":{"id":"D","p":"0.05"}},
 #  {"op":"set_gate","gate":{"id":"G2","kind":"AND","inputs":["A","D"]}}]
+# rate 事件用 set_event_rate（完整重跑转换闸门，p 自动重派生）：
+# [{"op":"set_event_rate","event":"P1","rate":{"model":"constant_failure_rate",
+#   "lambda":"5e-6","lambda_unit":"1/h","mission_time":"2000","mission_time_unit":"h",
+#   "repairable":false,"source":"derating per vendor rev B"}}]
 
 # 回退到某个旧基线（提案从基线表自建，仍需两步人类批准；无 --assume-yes）
 python run.py store  baseline store.sqlite <model_id> --all            # 列出持有过的基线
@@ -130,13 +134,13 @@ python run.py fmea propose-from-importance store.sqlite --run <run_id> \
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install pytest    # 联网准备环境执行
-.venv/Scripts/python -m pytest tests/ -q      # 290 项，离线可跑
+.venv/Scripts/python -m pytest tests/ -q      # 297 项，离线可跑
 
 # 交叉验证不需要 pytest（纯标准库）：
 python verification/run_cross_check.py              # 210 模型（结构），离线可跑
 python verification/run_rate_cross_check.py         # 120 模型（λt→q 转换），离线可跑
 python verification/run_importance_cross_check.py   # 120 模型（重要度），离线可跑
-python verification/run_store_verification.py       # 存储（重推导 + 突变测试 + 往返 + revert/impact/patch 契约），离线可跑
+python verification/run_store_verification.py       # 存储（重推导 + 突变测试 + 往返 + revert/impact/patch+rate-edit 契约），离线可跑
 python verification/run_fmea_verification.py        # FMEA（原始列独立重哈希 + 状态机 + 突变测试），离线可跑
 ```
 
