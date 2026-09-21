@@ -34,9 +34,9 @@ class Capability:
 def initial_capabilities(adapter_version: str) -> list[Capability]:
     """本机当前真实能力矩阵（2026-09-21 审计后）。
 
-    纪律：历史 6/6 PASS 是 2026-08-19 的实测证据，但**今日许可服务 STOPPED**，
-    当前会话无法实测复跑 → run_analysis 降级为 partial（方法已验证、通道当前阻塞）。
-    XML 生成/契约校验不依赖 medini，今日已实测 → verified。
+    纪律：能力状态随实测更新。2026-09-21 18:53 许可恢复后实机复跑通过：
+    A/B/C 切片（Q=0.044 vs 独立参考 11/250，rel err 5.8e-17）与 OR 树切片
+    （Q=0.28）双双 pass，real_medini 集成测试 2/2 PASS → run_analysis 升 verified。
     """
     return [
         Capability(
@@ -53,25 +53,25 @@ def initial_capabilities(adapter_version: str) -> list[Capability]:
             status="verified",
             software_version="medini-analyze-2023R2",
             adapter_version=adapter_version,
-            method="XML 编码契约来自反编译 importer + FTMinimal.xsd + 6/6 实测导入（2026-08-19）",
+            method="XML 编码契约来自反编译 importer + FTMinimal.xsd + 实测导入（2026-08-19 6/6；2026-09-21 复验 abc/or 两切片导入计算成功）",
             restrictions="仅 AND/OR/VOTE；概率为 Fixed 模型；NOT/XOR 显式拒绝",
             evidence_id="EV-XML-CONTRACT",
         ),
         Capability(
             capability_id="medini.run_analysis_headless",
-            status="partial",
+            status="verified",
             software_version="medini-analyze-2023R2",
             adapter_version=adapter_version,
-            method="headless CLI（analyzeApplication script 通道）历史 6/6 PASS（2026-08-19）；今日许可 STOPPED 无法复跑",
-            restrictions="需许可服务 running（管理员启动）；每实例一个写作业",
-            evidence_id="EV-RUN-HISTORIC",
+            method="headless CLI（analyzeApplication script 通道）2026-09-21 18:53 实测：abc 切片 Q=0.044(rel 5.8e-17)、or 切片 Q=0.28(rel 9.5e-17)，47/47 测试含 real_medini 2/2 PASS",
+            restrictions="需许可服务（lmgrd+ansyslmd 监听 1055）；每实例一个写作业",
+            evidence_id="EV-RUN-20260921",
         ),
         Capability(
             capability_id="medini.save_reopen_readback",
             status="partial",
             software_version="medini-analyze-2023R2",
             adapter_version=adapter_version,
-            method="历史实测 .fta 持久化进工程后 GUI 可开（2026-08-19）；保存重开回读链今日未复跑",
+            method="结果回读已实测（2026-09-21 Q/MCS 三角校核 pass）；保存→关闭→重开链路未复跑（P1）",
             restrictions="GUI 画树需 cockpit license 或手动双击 .fta 激活 bundle",
             evidence_id="EV-READBACK-HISTORIC",
         ),

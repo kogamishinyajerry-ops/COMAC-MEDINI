@@ -3,7 +3,7 @@
 // 占位符：__XML_PATH__（FaultTreePlus XML 绝对路径）、__OUT_JSON__（结果 JSON 绝对路径）、
 //         __RUN_LOG__（运行日志）、__K_MAX__（割集阶上限）、__CASE__（案例名）
 var CASE = "__CASE__";
-var K_MAX = __K__;
+var K_MAX = __K_MAX__;
 var XML_PATH = "__XML_PATH__";
 var OUT_JSON = "__OUT_JSON__";
 var RUN_LOG = "__RUN_LOG__";

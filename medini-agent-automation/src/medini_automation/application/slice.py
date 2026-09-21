@@ -23,7 +23,7 @@ from ..domain import reference
 from ..domain.model import FaultTree, from_contract_json
 from ..worker.job import Job, JobStore
 
-TEMPLATE_JS = Path(__file__).resolve().parents[2] / "scripts" / "medini" / "slice-run-case.js"
+TEMPLATE_JS = Path(__file__).resolve().parents[3] / "scripts" / "medini" / "slice-run-case.js"
 
 
 def license_service_running() -> bool:
@@ -130,15 +130,20 @@ def run_slice(
             mode = "medini-run"
             js_out = evidence / "execution" / f"{case}-actual.json"
             run_log = evidence / "execution" / f"{case}-run.log"
-            js_path = evidence / "execution" / f"run-{case}.js"
+            js_path = (evidence / "execution" / f"run-{case}.js").resolve()
+            js_out = js_out.resolve()
+            run_log = run_log.resolve()
+            xml_path = xml_path.resolve()
+            evidence = evidence.resolve()
             js_path.parent.mkdir(parents=True, exist_ok=True)
+            # JS 在 medini JVM 内执行，cwd 不同——一律注入绝对路径
             js_path.write_text(
                 TEMPLATE_JS.read_text(encoding="utf-8")
                 .replace("__CASE__", case)
                 .replace("__K_MAX__", str(k_max))
-                .replace("__XML_PATH__", str(xml_path).replace("\\", "/"))
-                .replace("__OUT_JSON__", str(js_out).replace("\\", "/"))
-                .replace("__RUN_LOG__", str(run_log).replace("\\", "/")),
+                .replace("__XML_PATH__", xml_path.resolve().as_posix())
+                .replace("__OUT_JSON__", js_out.resolve().as_posix())
+                .replace("__RUN_LOG__", run_log.resolve().as_posix()),
                 encoding="utf-8")
 
             job.transition("queued", "实机通道可用，提交 headless")
