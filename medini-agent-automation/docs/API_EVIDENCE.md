@@ -51,6 +51,10 @@ A/B/C 切片 = 开工提示词指定算例：T=(A∧B)∨(A∧C)，p=0.1/0.2/0.3
 
 ## EV-GUI-UNVERIFIED / EV-UPDATE-NONE — 未验证项（诚实边界）
 
+- GUI 画布内的**目视渲染**：本会话未实测 → unverified
+  （已实测的是「图文件被 medini 正确加载 + 全部 href 可 resolve」，见
+  EV-DIAGRAM-20260921；这不等于「画布一定画出来」。人工入口
+  `scripts\open-workcopy-gui.bat`）
 - GUI 截图工具链：历史在用户桌面验证过（PrintWindow PW_RENDERFULLCONTENT=2），
   本会话未实测 → unverified
 - 更新既有 medini 工程：未开发（首期只在工作副本内新建树）→ unverified
@@ -92,3 +96,88 @@ A/B/C 切片 = 开工提示词指定算例：T=(A∧B)∨(A∧C)，p=0.1/0.2/0.3
 **本仓实现**：`src/medini_automation/application/persistence.py`（编排 +
 `_evaluate` 四重校核纯函数）；模板 `scripts/medini/slice-save.js` / `slice-reopen.js`；
 CLI `reopen-check`；单测 `tests/unit/test_persistence.py`（22 项）。
+
+## EV-DIAGRAM-20260921 — GUI 可见性：`.fta_diagram` 生成与工程登记（P1.5，实测通过）
+
+**核心发现：GUI 可见的不是 `.fta`，而是 `.fta_diagram`。** `.project.medini` 里
+登记成 `xsi:type="pjm:PJDiagram"` 的是 **GMF notation 视图文件**（`uri` 指向
+`.fta_diagram`、`canvasElement href` 指向 `.fta` 中根节点）。只落盘 `.fta` 而
+不写 `.fta_diagram` + 不登记 = **孤儿模型**（既有工程里 DBG1 / PROTO-1 / DEMO-*
+全部是此类，Model Browser 里看不到）。
+
+### 登记条目形态（`.project.medini` 内的 `<containedElements>`）
+
+| 字段 | 值 |
+|---|---|
+| `xsi:type` | `pjm:PJDiagram` |
+| `uri` | `fta/<case>.fta_diagram` |
+| `canvasElement` 的 `href` | `<case>.fta#<root 元素 xmi:id>` |
+| `editorID` | `de.ikv.medini.editor.fta.diagram.part.FaultTreeAnalysisDiagramEditorID` |
+| `modelID` | `FaultTreeAnalysis` |
+
+实现走**文本级正则插入**而非 ElementTree 重写 —— 后者会把命名空间前缀改写成
+`ns0:`，破坏 medini 的解析。幂等三态：内容等价 → `unchanged`；`root_id` 变化
+（重存后 xmi:id 变了）→ `updated`；原本无条目 → `created`。
+
+### 图文件（GMF notation）格式契约 —— 实机确证，非推测
+
+| 契约 | 值 | 若违反 |
+|---|---|---|
+| 类型标记命名空间 | **`xmi:type`**（既有 9 个样例共 625 处） | 写成 `xsi:type` 与既有样例不符（`.fta` 模型文件才用 `xsi:type`） |
+| `notation:Bounds` 的 `x`/`y` | **EInt，必须整数** | 小数 → `IllegalValueException: Value '404.5' is not legal`，图加载失败 |
+| 边方向语义 | `source` = `Connection.outputNode`（视觉在下）、`target` = `Connection.inputNode`（视觉在上） | 树上下颠倒 |
+| `children`/`edges`/`element` | **无命名空间前缀** | 解析失败 |
+| 文件内相对 href | `abc.fta#_eX2ZDL...` | proxy 无法 resolve |
+| `notation:Diagram type` | `FaultTreeAnalysis`、`measurementUnit="Pixel"` | 编辑器不认 |
+
+节点样式 ID：Shape `2005`=EventNode / `2006`=LogicalGate / `2008`=TransferGate；
+Edge `4003`=Connector；DecorationNode `5008/5009/5010/5015`（事件）、`5012`（门）、
+`5014`（传递门）、`6001`（边标签）。
+
+### 实测验收（headless 加载，`scripts/medini/verify-diagram.js`）
+
+7 项 checks 全绿、**0 个 proxy**、资源类实例化为
+`de.ikv.medini.cockpit.gmf.MediniGMFResource`：
+
+| 切片 | children | edges | diagram_etype | top_element_type |
+|---|---|---|---|---|
+| abc | 10 | 9 | `Diagram` | `FTAModel` |
+| or_save | 4 | 3 | `Diagram` | `FTAModel` |
+| abc_persist（发布后独立复验） | 10 | 9 | `Diagram` | `FTAModel` |
+
+checks 列表：`diagram_loaded` / `diagram_type_ok` / `children_count_match` /
+`edges_count_match` / `top_element_is_ftamodel` / `all_children_resolved` /
+`all_edges_resolved`（后两项用 `EmfURI.createFileURI(...)` + `rs.getResource(..., true)`
+后 `isProxy()` 判定 href 是否 resolve）。
+
+### 工程完整性硬要求（把「无输出」变成可操作诊断）
+
+`-files <dir>` 的载体必须是**完整 medini 工程**，只含
+`.project` + `.project.medini` + `fta/` 的「最小工程」**不够**：
+medini 在加载 `-files` 工程阶段就中断 —— 进程 **exit=0**、JS 完全不执行、
+无任何结果文件，只在 stdout 尾部（logback 日志之后）吐：
+
+```
+java.lang.InterruptedException
+  at de.ikv.analyze.compare.ui.handler.ProjectCompareInput.doLoadFrom(ProjectCompareInput.java:137)
+  at de.ikv.analyze.cli.uijob.ScriptJob.doWork(ScriptJob.java:88)
+```
+
+→ `verify_diagram` 改为**先自行判断工程完整性**（缺 `.commons.medini` /
+`.projectMapping` 等域配置即稳定诊断），再叠加 stdout 栈作辅助；
+`publish_diagram` 在工程不完整时仍产出图+登记，但写入 `notes` 告警（不静默）。
+`medini_cli.py` 的 stdout 尾部窗口由 800 → **4000 字符**（该失败栈在 logback
+初始化日志之后，800 会截掉最有诊断价值的行）。
+
+**本仓实现**：`src/medini_automation/adapters/fta_diagram.py`（parse/layout/render）、
+`src/medini_automation/application/visibility.py`（publish/register/verify/orphans）、
+`scripts/medini/verify-diagram.js`；CLI `publish-diagram` / `visibility` /
+`verify-diagram` / `reopen-check --publish`；单测 `tests/unit/test_fta_diagram.py`（50 项）。
+
+### 诚实边界（未验证项）
+
+- **GUI 里的实际渲染未目视确认**（沙箱 Session 0 隔离，GUI 窗口用户桌面不可见）：
+  已验证的是「图文件能被 medini 正确加载且全部 href 可 resolve」，
+  不等于「画布一定画出来」。人工确认入口：双击 `scripts\open-workcopy-gui.bat`
+- 图形为**自动树布局**（按深度分层、同层中心对齐），可读但非手工排布
+- 图登记后 medini **不自动刷新**：需重开工程或 F5

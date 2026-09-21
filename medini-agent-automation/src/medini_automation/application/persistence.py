@@ -52,6 +52,7 @@ class ReopenResult:
     evidence_dir: str = ""
     job_id: str = ""
     saved_fta: str | None = None
+    publish: dict[str, Any] | None = None   # P1.5 发布结果（--publish 时）
     artifacts: dict[str, str] = field(default_factory=dict)
 
 
@@ -126,6 +127,26 @@ def _evaluate(save_json: dict[str, Any] | None,
     return "fail", f"重开回读不一致: {', '.join(bad)}", checks
 
 
+def _publish_for_gui(saved_fta: Path, project_dir: Path,
+                     case: str) -> dict[str, Any]:
+    """P1.5：为刚保存的 .fta 生成 .fta_diagram 并登记进工程。异常不外抛。"""
+    from .visibility import publish_diagram
+    try:
+        res = publish_diagram(saved_fta, project_dir=project_dir, case=case)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "errors": [f"{type(e).__name__}: {e}"]}
+    return {
+        "ok": res.ok,
+        "diagram": res.diagram_path,
+        "diagram_sha256": res.diagram_sha256,
+        "counts": res.counts,
+        "bbox": res.bbox,
+        "registration": (None if res.registration is None
+                         else res.registration.action),
+        "errors": res.errors,
+    }
+
+
 def run_reopen_check(
     contract_json: Path,
     out_root: Path,
@@ -133,6 +154,7 @@ def run_reopen_check(
     case: str | None = None,
     k_max: int = 6,
     execute: bool = True,
+    publish: bool = False,
     exe: Path = MEDINI_EXE_DEFAULT,
     workspace: Path = DEFAULT_WORKSPACE,
     workcopy_project: Path = WORKCOPY_PROJECT_DEFAULT,
@@ -194,6 +216,7 @@ def run_reopen_check(
     mode = "dry-run"
     save_json: dict[str, Any] | None = None
     reopen_json: dict[str, Any] | None = None
+    publish_info: dict[str, Any] | None = None
 
     if not blocked_reason:
         mode = "reopen-run"
@@ -262,6 +285,14 @@ def run_reopen_check(
                 reopen_json = {"status": "no_output", "exit_code": cliB.exit_code,
                                "stdout_tail": cliB.stdout_tail}
 
+        # ---- P1.5：发布到工程（生成图 + 登记 PJDiagram，使 GUI 可见）----
+        if publish and (save_json or {}).get("status") == "ok":
+            publish_info = _publish_for_gui(saved_fta, workcopy_project, slug)
+            if publish_info.get("ok"):
+                job.notes.append(
+                    f"published diagram={publish_info.get('diagram')} "
+                    f"register={publish_info.get('registration')}")
+
         # ---- 判定 ----
         verdict, detail, checks = _evaluate(save_json, reopen_json)
         if verdict == "pass":
@@ -302,6 +333,7 @@ def run_reopen_check(
         "job_state": job.state,
         "k_max": k_max,
         "checks": checks_out,
+        "publish": publish_info,
     }
     (evidence / "verification").mkdir(exist_ok=True)
     if q_ref is not None:
@@ -320,5 +352,6 @@ def run_reopen_check(
         verdict=verdict, verdict_detail=detail,
         evidence_dir=str(evidence), job_id=job.job_id,
         saved_fta=str(workcopy_project / "fta" / f"{slug}.fta"),
+        publish=publish_info,
         artifacts={"manifest": str(evidence / "manifest.json"),
                    "xml": str(xml_path)})

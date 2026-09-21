@@ -29,6 +29,19 @@
 ## 并发限制
 每 medini 实例一个写作业（公共契约 §5；未实测许可并发，不假设支持）
 
-## 已知 GUI 限制（不承诺）
-- GUI 画树需 `medini_analyze_cockpit` license feature（当前许可池无）或用户手动双击 .fta
-- 沙箱 Session 0：PrintWindow 截图可跨会话，SendInput/SetForegroundWindow 不可
+## GUI 可见性（P1.5，2026-09-21 完成）
+
+**已支持**
+- 为落盘的 `.fta` 生成 `.fta_diagram`（GMF notation 视图）+ 登记进
+  `.project.medini` 的 `PJDiagram` 条目 → 该树成为工程树里的**可双击图**，不再是孤儿模型
+- headless 侧可校验图文件：加载 + 7 项 checks + proxy 判定，全绿才算通过
+- 人工复核入口：双击 `scripts\open-workcopy-gui.bat`（把 `workcopy\AUTO-WC`
+  以 `mklink /J` 链接进 medini workspace 后启动 GUI）
+- 命令：`publish-diagram` / `visibility` / `verify-diagram` / `reopen-check --publish`
+
+**边界（不承诺）**
+- 沙箱 Session 0 隔离：**沙箱内启动的 GUI 窗口用户桌面看不到**，必须用户自己双击 .bat
+- 「图文件加载正确」≠「画布一定渲染」：渲染效果未目视确认
+- 图形为自动树布局，非手工排布；登记后需重开工程或 F5 才刷新
+- GUI 画树若报 license 缺失，需 `medini_analyze_cockpit` feature（当前许可池无）
+- PrintWindow 截图可跨会话，SendInput/SetForegroundWindow 不可

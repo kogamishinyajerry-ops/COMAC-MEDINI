@@ -82,4 +82,6 @@ def run_headless(
     fresh = bool(
         expect_json and expect_json.exists()
         and expect_json.stat().st_mtime >= t0)
-    return CliResult(rc, time.time() - t0, so[-800:], expect_json, fresh)
+    # 尾部窗口取宽一些：medini 的失败栈（如加载阶段 InterruptedException）在
+    # logback 初始化日志之后，800 字符会被截断掉最有诊断价值的那几行。
+    return CliResult(rc, time.time() - t0, so[-4000:], expect_json, fresh)

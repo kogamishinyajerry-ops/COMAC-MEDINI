@@ -23,13 +23,23 @@
 - 命令：`python -m medini_automation.cli reopen-check <contract.json> --out runs`
 - 坑位与证据：`docs/API_EVIDENCE.md` § EV-PERSIST-20260921
 
-## P1.5 — 工作副本工程 GUI 可见性（可选增强）
+## ✅ P1.5 — 工作副本工程 GUI 可见性（已完成 2026-09-21）
 
-- 把 `workcopy/AUTO-WC/fta/<case>.fta` 注册进 `AUTO-WC/.project.medini` 的
-  PJDiagram 条目（复用 `D:\MediniAgent\...\gen_diagrams.py` 的注册逻辑）
-- 并生成 `.fta_diagram` 视图文件（Shape/Connector 全量写出，GMF 不会自动补视图）
-- 验收：GUI 打开 AUTO-WC 工程，Model Browser 可见该树且画布有节点
+- 生成 `.fta_diagram` 视图文件：`adapters/fta_diagram.py`
+  （parse_fta → layout_tree → render_diagram，Shape/Connector 全量写出，
+  GMF 不会自动补视图）
+- 登记进 `AUTO-WC/.project.medini`：`application/visibility.py::register_in_project`
+  （文本级插入 PJDiagram 条目，幂等三态 unchanged/updated/created）
+- 验收达成 —— 实机 headless 加载图文件 7/7 checks 全绿、0 proxy：
+  - abc：10 children / 9 edges；or_save：4 children / 3 edges
+  - 资源类 `MediniGMFResource`、`diagram_etype == "Diagram"`、
+    `top_element_type == "FTAModel"`
+- 命令：`cli publish-diagram <project> --case abc` / `cli visibility <project>` /
+  `cli verify-diagram <project> --case abc`；`reopen-check --publish` 保存后自动发布
+- 人工复核入口：双击 `scripts\open-workcopy-gui.bat`（把 AUTO-WC 链接进 medini
+  workspace 并启动 GUI）
 - 价值：人工复核/演示；不影响 headless 链路
+- 实测契约与完整工程要求：`docs/API_EVIDENCE.md` § EV-DIAGRAM-20260921
 
 ## P2 — DSH 接入（下一步主线）
 

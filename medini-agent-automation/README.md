@@ -31,6 +31,35 @@ python -m pytest tests/ -q
 四重校核（`application/persistence.py::_evaluate`）：语义摘要一致 / Q 一致 /
 磁盘字节 SHA-256 一致 / 结构计数一致。只写本仓工作副本，不更新既有工程。
 
+## GUI 可见性（P1.5）
+
+默认只落盘 `.fta` 会得到**孤儿模型**（Model Browser 里看不到）。
+GUI 可见的登记对象是 `.fta_diagram`（GMF notation 视图）——加 `--publish` 一步到位：
+
+```bash
+# 保存后自动生成图 + 登记进工程
+python -m medini_automation.cli reopen-check tests/fixtures/slice_abc.json --publish --out runs
+
+# 或对既有 .fta 单独发布
+python -m medini_automation.cli publish-diagram workcopy/AUTO-WC --case abc
+python -m medini_automation.cli visibility workcopy/AUTO-WC          # 审计：列出未登记的孤儿 .fta
+python -m medini_automation.cli verify-diagram workcopy/AUTO-WC --case abc  # 实机校验图可加载
+```
+
+| 子命令 | 作用 | 退出码 |
+|---|---|---|
+| `publish-diagram <project> --case X` | 生成 `.fta_diagram` + 登记 `.project.medini`（幂等：`created`/`updated`/`unchanged`）；`--no-register` 只生成图 | 0 / 3 |
+| `visibility <project>` | 列出工程内未登记（GUI 不可见）的 `.fta` 孤儿 | **0=全可见；1=有孤儿**（审计语义，非报错） |
+| `verify-diagram <project> --case X` | 实机加载图文件，7 项 checks + proxy 判定 | 0=pass / 1=blocked / 3=fail |
+
+**人工复核入口**：双击 `scripts\open-workcopy-gui.bat` —— 把 `workcopy\AUTO-WC`
+以目录链接挂进 medini workspace 并启动 GUI。
+
+格式契约（实测确证，非推测）：notation 图文件用 **`xmi:type`**（`.fta` 模型才用
+`xsi:type`）；`notation:Bounds` 的 `x`/`y` 是 **EInt，必须整数**（小数 → 图加载抛
+`IllegalValueException`）；边 `source` = 视觉在下、`target` = 视觉在上。
+详见 `docs/API_EVIDENCE.md` § EV-DIAGRAM-20260921。
+
 ## 纪律红线（公共契约）
 
 1. medini 是唯一真实计算后端；Mock/合成结果必须标 synthetic

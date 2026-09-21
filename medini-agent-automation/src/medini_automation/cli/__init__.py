@@ -183,13 +183,14 @@ def cmd_reopen_check(args: argparse.Namespace) -> int:
         return 2
     res = run_reopen_check(
         contract, Path(args.out), case=args.case, k_max=args.k_max,
-        execute=not args.dry)
+        execute=not args.dry, publish=args.publish)
     payload = {
         "case": res.case, "mode": res.mode, "verdict": res.verdict,
         "verdict_detail": res.verdict_detail,
         "reference_Q": res.reference_q,
         "checks": res.checks,
         "saved_fta": res.saved_fta,
+        "publish": res.publish,
         "evidence_dir": res.evidence_dir, "job_id": res.job_id,
     }
     if res.save:
@@ -206,6 +207,72 @@ def cmd_reopen_check(args: argparse.Namespace) -> int:
     if res.verdict == "blocked":
         return 1
     return 3  # fail / error
+
+
+# --------------------------------------------------------- publish-diagram
+def cmd_publish_diagram(args: argparse.Namespace) -> int:
+    """P1.5：为落盘 .fta 生成 .fta_diagram 并登记进 .project.medini。"""
+    from ..application.visibility import publish_diagram
+    res = publish_diagram(args.fta, project_dir=args.project, case=args.case,
+                          register=not args.no_register)
+    payload = {
+        "case": res.case, "slug": res.slug, "ok": res.ok,
+        "fta": res.fta_path, "diagram": res.diagram_path,
+        "diagram_sha256": res.diagram_sha256,
+        "counts": res.counts, "bbox": res.bbox,
+        "registration": (None if res.registration is None
+                         else {"action": res.registration.action,
+                               "project_file": res.registration.project_file}),
+        "errors": res.errors,
+        "notes": res.notes,
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if res.ok else 2
+
+
+# --------------------------------------------------------------- visibility
+def cmd_visibility(args: argparse.Namespace) -> int:
+    """审计工程的 GUI 可见性：哪些 .fta 已在工程树里、哪些是孤儿。"""
+    from ..application.visibility import list_orphans
+    report = list_orphans(args.project)
+    payload = {
+        "project": str(Path(args.project)),
+        "registered_count": len(report["registered"]),
+        "unregistered_count": len(report["unregistered"]),
+        "registered": report["registered"],
+        "unregistered": report["unregistered"],
+        "note": "unregistered = 有 .fta 但未登记 PJDiagram，在 GUI 项目树中不可见；"
+                "用 publish-diagram 发布",
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if not report["unregistered"] else 1
+
+
+# ---------------------------------------------------------- verify-diagram
+def cmd_verify_diagram(args: argparse.Namespace) -> int:
+    """P1.5 实机校验：在 medini 里加载 .fta_diagram，核对结构与引用解析。"""
+    from ..application.visibility import verify_diagram
+    res = verify_diagram(args.case, project_dir=args.project, out_root=args.out)
+    payload = {k: res.get(k) for k in
+               ("case", "status", "verdict", "checks", "failed_checks",
+                "expect_nodes", "expect_edges")}
+    raw = res.get("raw") or {}
+    payload["observed"] = {k: raw.get(k) for k in
+                           ("children_total", "children_proxy", "edges_total",
+                            "edges_proxy", "top_element_type", "diagram_etype")}
+    if res.get("error"):
+        payload["error"] = res["error"]
+    if res.get("diagnosis"):
+        payload["diagnosis"] = res["diagnosis"]
+    if res.get("stdout_tail"):
+        payload["stdout_tail"] = res["stdout_tail"]
+    if res.get("log_tail"):
+        payload["log_tail"] = res["log_tail"]
+    if res.get("out_json"):
+        payload["evidence_dir"] = str(Path(res["out_json"]).parent)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    v = res.get("verdict")
+    return 0 if v == "pass" else (1 if v == "blocked" else 3)
 
 
 # ------------------------------------------------------------------- main
@@ -252,7 +319,30 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--case", default=None)
     rc.add_argument("--k", type=int, default=6, dest="k_max")
     rc.add_argument("--dry", action="store_true", help="只生成工件，不跑实机")
+    rc.add_argument("--publish", action="store_true",
+                    help="P1.5：保存成功后自动生成 .fta_diagram 并登记进工程")
     rc.set_defaults(func=cmd_reopen_check)
+
+    pd = sub.add_parser("publish-diagram",
+                        help="P1.5：生成 .fta_diagram + 登记 .project.medini（GUI 可见）")
+    pd.add_argument("project", help="medini 工程目录（含 .project.medini）")
+    pd.add_argument("--case", required=True, help="案例名（决定 .fta/.fta_diagram 文件名）")
+    pd.add_argument("--fta", default=None, help=".fta 路径，默认 <project>/fta/<case>.fta")
+    pd.add_argument("--no-register", action="store_true",
+                    help="只生成图文件，不改 .project.medini")
+    pd.set_defaults(func=cmd_publish_diagram)
+
+    vis = sub.add_parser("visibility",
+                         help="审计工程 GUI 可见性（列出未登记的孤儿 .fta）")
+    vis.add_argument("project")
+    vis.set_defaults(func=cmd_visibility)
+
+    vd = sub.add_parser("verify-diagram",
+                        help="P1.5：实机校验 .fta_diagram 可加载/结构/引用解析")
+    vd.add_argument("project")
+    vd.add_argument("--case", required=True)
+    vd.add_argument("--out", default="runs")
+    vd.set_defaults(func=cmd_verify_diagram)
     return ap
 
 

@@ -1,0 +1,12 @@
+# Windows 批处理必须 CRLF，且不能带 UTF-8 BOM（BOM 会被当成命令名的一部分）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 源码与文档用 LF
+*.py text eol=lf
+*.js text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
