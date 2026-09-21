@@ -42,3 +42,24 @@ def test_slice_or_save_reopen(tmp_path):
     res = run_slice(FIX / "slice_or_save.json", tmp_path, case="or_real",
                     execute=True)
     assert res.verdict == "pass", res.verdict_detail
+
+
+@needs_medini
+def test_persist_abc_save_reopen_on_real_medini(tmp_path):
+    """P1 保存→重开→回读实机四重校核。
+
+    阶段A/B 是两个独立 medini 进程（真正的关闭→重开），要求：
+    语义摘要一致、Q0==Q1、磁盘字节哈希一致、结构计数一致。
+    只写本仓工作副本 workcopy/AUTO-WC（不更新既有工程）。
+    """
+    from medini_automation.application.persistence import run_reopen_check
+    if not (MEDINI_EXE.exists() and license_service_running()):
+        pytest.skip("blocked: medini exe 缺失或许可 1055 未监听（需用户态拉起 lmgrd）")
+    res = run_reopen_check(FIX / "slice_abc.json", tmp_path, case="abc_persist",
+                           execute=True)
+    assert res.verdict == "pass", res.verdict_detail
+    c = res.checks
+    assert c["semantic_digest_equal"] and c["Q_equal"]
+    assert c["bytes_sha256_equal"] and c["counts_equal"]
+    assert res.save and res.save.get("Q0") == "0.044"
+    assert res.reopen and res.reopen.get("Q1") == "0.044"

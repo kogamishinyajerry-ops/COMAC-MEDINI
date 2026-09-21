@@ -15,8 +15,21 @@ pip install -e .
 python -m medini_automation.cli doctor      # 环境自检
 python -m medini_automation.cli dry-run tests/fixtures/slice_abc.json --out runs
 python -m medini_automation.cli run tests/fixtures/slice_abc.json --out runs   # 需许可
+python -m medini_automation.cli reopen-check tests/fixtures/slice_abc.json --out runs  # P1 保存/重开
 python -m pytest tests/ -q
 ```
+
+## 保存→重开→回读（P1）
+
+`reopen-check` 用**两个独立 medini 进程**构成真正的「关闭 → 重开」：
+
+| 阶段 | 脚本 | 动作 |
+|---|---|---|
+| A | `scripts/medini/slice-save.js` | 导入 XML → 算 Q0 → 规范语义摘要 → `save` 到 `workcopy/AUTO-WC/fta/` |
+| B | `scripts/medini/slice-reopen.js` | 新 JVM 从磁盘加载 → 回读摘要 → 重算 Q1 |
+
+四重校核（`application/persistence.py::_evaluate`）：语义摘要一致 / Q 一致 /
+磁盘字节 SHA-256 一致 / 结构计数一致。只写本仓工作副本，不更新既有工程。
 
 ## 纪律红线（公共契约）
 

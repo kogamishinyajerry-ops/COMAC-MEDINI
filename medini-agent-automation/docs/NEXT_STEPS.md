@@ -1,27 +1,44 @@
 # NEXT_STEPS（docs/NEXT_STEPS.md）
 
-按 30 天计划（A_核心规划 §07）推进，每步有明确验收物。
+按步骤推进（禁止按月份/季度规划）。每步有明确验收物与当前状态。
 
-## P0 — 解锁实机闭环（阻塞项，依赖用户操作）
+## ✅ P0 — 解锁实机闭环（已完成 2026-09-21）
 
-1. **管理员启动许可服务**：`Start-Service 'ANSYS, Inc. License Manager'`（用户态已实测无权限）
-2. `python -m medini_automation.cli run tests/fixtures/slice_abc.json --out runs`
-   → 验收：verdict=pass，Q_top=0.044 与独立参考一致（三角校核自动化完成）
-3. `pytest -m real_medini` → 2 个集成测试从 SKIPPED 转 PASS
-4. 72 小时闸门达成：OR 树 + ABC 树实机闭环 + 回读校核
+- 许可修复：`lmgrd(v11.13) + ansyslmd` 用户态拉起 SERVER 模式（1055 监听）
+  —— 见 `docs/LICENSE_FIX_20260921.md`
+- `run` 子命令实机 pass：abc 切片 Q=0.044、or 切片 Q=0.28
+- `pytest -m real_medini` 全部转 PASS
+- 72 小时闸门「实机计算 + 回读校核」达成
 
-## P1 — 保存重开回读（开工提示词纵向切片中段）
+## ✅ P1 — 保存→重开→回读链（已完成 2026-09-21）
 
-- JS 模板扩展：把导入的 .fta 持久化写入工作副本工程 → 关闭 → 重开 → 回读事件/门语义 → diff
-- 验收：重开后语义哈希与写入前一致
-- 复用资产：`gen_diagrams.py` 的 `.project.medini` PJDiagram 注册逻辑（D:\MediniAgent）
+- 两阶段独立 JVM 进程：`slice-save.js`（导入+算Q0+摘要+落盘）
+  → `slice-reopen.js`（新进程加载+回读+算Q1）
+- 只写本仓工作副本 `workcopy/AUTO-WC`（不更新既有工程）
+- 验收达成 —— 四重校核全绿（abc 与 or_save 两切片）：
+  1. 语义摘要 SHA-256 逐位一致
+  2. Q0 == Q1（abc 0.044；or_save 0.28）
+  3. 磁盘字节 SHA-256 一致（读回的正是写入字节）
+  4. events/gates/nodes/conns 计数全等
+- 命令：`python -m medini_automation.cli reopen-check <contract.json> --out runs`
+- 坑位与证据：`docs/API_EVIDENCE.md` § EV-PERSIST-20260921
 
-## P2 — DSH 接入（A_核心规划 §02）
+## P1.5 — 工作副本工程 GUI 可见性（可选增强）
+
+- 把 `workcopy/AUTO-WC/fta/<case>.fta` 注册进 `AUTO-WC/.project.medini` 的
+  PJDiagram 条目（复用 `D:\MediniAgent\...\gen_diagrams.py` 的注册逻辑）
+- 并生成 `.fta_diagram` 视图文件（Shape/Connector 全量写出，GMF 不会自动补视图）
+- 验收：GUI 打开 AUTO-WC 工程，Model Browser 可见该树且画布有节点
+- 价值：人工复核/演示；不影响 headless 链路
+
+## P2 — DSH 接入（下一步主线）
 
 - 既有形态：`D:\MediniAgent\dsh-plugin\dsh-medini.mcp.json`（MCP server 注册）
-- 动作：按本仓 CLI 重新暴露 medini_get_capabilities / read_project / prepare_change /
-  apply_change / run_analysis / get_job / readback / export_evidence 八接口
-- 验收：DSH 会话内完成一次 `capabilities → dry-run → run` 链
+- 动作：按本仓 CLI 重新暴露八个接口 ——
+  `medini_get_capabilities / read_project / prepare_change / apply_change /
+  run_analysis / get_job / readback / export_evidence`
+  （现新增 `reopen_check` 作为 readback 的强校核变体）
+- 验收：DSH 会话内完成一次 `capabilities → reopen-check → run` 链
 
 ## P3 — 变更协调器实装（A03 工作包）
 
@@ -29,6 +46,7 @@
 - 验收：旧基线/重复请求/伪造批准三类测试通过（部分已在单测）
 
 ## 明确不做（首期）
+
 - 更新既有 medini 工程（只在工作副本新建）
 - 动态门/失效率/修复/共因语义
 - 多实例并发、分布式作业平台、通用 Computer Use

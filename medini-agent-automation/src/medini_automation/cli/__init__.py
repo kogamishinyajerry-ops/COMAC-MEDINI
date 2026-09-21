@@ -57,11 +57,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         s.close()
 
     # workspace / project (headless 通道依赖)
-    from ..adapters.medini_cli import DEFAULT_WORKSPACE, DEFAULT_PROJECT
+    from ..adapters.medini_cli import (
+        DEFAULT_PROJECT, DEFAULT_WORKSPACE, WORKCOPY_PROJECT_DEFAULT,
+    )
     rows["headless_workspace"] = {
         "path": str(DEFAULT_WORKSPACE), "exists": DEFAULT_WORKSPACE.exists()}
     rows["headless_project"] = {
         "path": str(DEFAULT_PROJECT), "exists": DEFAULT_PROJECT.exists()}
+    rows["workcopy_project"] = {
+        "path": str(WORKCOPY_PROJECT_DEFAULT),
+        "exists": WORKCOPY_PROJECT_DEFAULT.exists(),
+        "note": "P1 保存/重开专用工作副本（不更新既有工程）"}
 
     # git
     git = shutil.which("git")
@@ -166,6 +172,42 @@ def cmd_readback(args: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------------------------------------------ reopen-check
+def cmd_reopen_check(args: argparse.Namespace) -> int:
+    """P1：保存 → 重开 → 回读链（两阶段独立进程）。"""
+    from ..application.persistence import run_reopen_check
+    contract = Path(args.contract)
+    if not contract.exists():
+        print(json.dumps({"error": f"FILE_NOT_FOUND: {contract}"}),
+              file=sys.stderr)
+        return 2
+    res = run_reopen_check(
+        contract, Path(args.out), case=args.case, k_max=args.k_max,
+        execute=not args.dry)
+    payload = {
+        "case": res.case, "mode": res.mode, "verdict": res.verdict,
+        "verdict_detail": res.verdict_detail,
+        "reference_Q": res.reference_q,
+        "checks": res.checks,
+        "saved_fta": res.saved_fta,
+        "evidence_dir": res.evidence_dir, "job_id": res.job_id,
+    }
+    if res.save:
+        payload["phaseA"] = {k: res.save.get(k) for k in
+                             ("status", "Q0", "semantic_digest",
+                              "saved_size", "saved_sha256", "error")}
+    if res.reopen:
+        payload["phaseB"] = {k: res.reopen.get(k) for k in
+                             ("status", "Q1", "semantic_digest",
+                              "loaded_size", "loaded_sha256", "error")}
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    if res.verdict == "pass":
+        return 0
+    if res.verdict == "blocked":
+        return 1
+    return 3  # fail / error
+
+
 # ------------------------------------------------------------------- main
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
@@ -202,6 +244,15 @@ def build_parser() -> argparse.ArgumentParser:
     rb = sub.add_parser("readback", help="汇总证据包三方对照")
     rb.add_argument("evidence")
     rb.set_defaults(func=cmd_readback)
+
+    rc = sub.add_parser("reopen-check",
+                        help="P1：保存.fta→新进程重开→回读语义/重算Q 四重校核")
+    rc.add_argument("contract")
+    rc.add_argument("--out", default="runs")
+    rc.add_argument("--case", default=None)
+    rc.add_argument("--k", type=int, default=6, dest="k_max")
+    rc.add_argument("--dry", action="store_true", help="只生成工件，不跑实机")
+    rc.set_defaults(func=cmd_reopen_check)
     return ap
 
 

@@ -68,12 +68,28 @@ def initial_capabilities(adapter_version: str) -> list[Capability]:
         ),
         Capability(
             capability_id="medini.save_reopen_readback",
-            status="partial",
+            status="verified",
             software_version="medini-analyze-2023R2",
             adapter_version=adapter_version,
-            method="结果回读已实测（2026-09-21 Q/MCS 三角校核 pass）；保存→关闭→重开链路未复跑（P1）",
-            restrictions="GUI 画树需 cockpit license 或手动双击 .fta 激活 bundle",
-            evidence_id="EV-READBACK-HISTORIC",
+            method=(
+                "P1 两阶段独立进程实测（2026-09-21）：阶段A 导入+算Q0(0.044)+摘要+"
+                "save(.fta file:URI) → 阶段B 新 JVM getResource(load)+回读+重算Q1(0.044)；"
+                "abc 与 or_save 两切片四重校核全 pass"),
+            restrictions=(
+                "file: URI 直落磁盘（platform:/resource 需 workspace 已导入工程，"
+                "-files 不建立该映射）；游离 EventProbabilityParameters 不入盘"),
+            evidence_id="EV-PERSIST-20260921",
+        ),
+        Capability(
+            capability_id="medini.persist_fta_roundtrip",
+            status="verified",
+            software_version="medini-analyze-2023R2",
+            adapter_version=adapter_version,
+            method=(
+                "语义摘要(事件 id/名/概率/kind + 门名/kind + 节点 + 连接拓扑) SHA-256 "
+                "在写入前后逐位一致；磁盘字节 SHA-256 一致；events/gates/nodes/conns 计数全等"),
+            restrictions="只写本仓工作副本 workcopy/AUTO-WC；未注册进 .project.medini（GUI 暂不可见）",
+            evidence_id="EV-PERSIST-20260921",
         ),
         Capability(
             capability_id="medini.gui_screenshot",

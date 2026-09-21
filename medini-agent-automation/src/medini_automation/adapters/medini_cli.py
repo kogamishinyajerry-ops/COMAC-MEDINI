@@ -28,6 +28,11 @@ APPLICATION_ID = "de.ikv.analyze.product.analyzeApplication"
 DEFAULT_WORKSPACE = Path(r"D:\MediniAgent\handoff\adversarial\group-b\medini\workspace")
 DEFAULT_PROJECT = Path(r"D:\MediniAgent\Analyze Workspace 2023 R2\F2244-71-004-C01")
 
+# P1 保存/重开专用：本仓自有的工作副本工程（不更新既有 medini 工程）
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+WORKCOPY_PROJECT_DEFAULT = _REPO_ROOT / "workcopy" / "AUTO-WC"
+WORKCOPY_PROJ_NAME = "AUTO-WC"
+
 
 class MediniUnavailable(RuntimeError):
     """medini 不可调用（未安装/许可停止/超时）。"""

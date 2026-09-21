@@ -29,11 +29,26 @@ python -m medini_automation.cli run tests/fixtures/slice_or_save.json --out runs
 
 ## 无网首启检查清单
 
-- [ ] `doctor` 报告 medini_exe exists=true
-- [ ] 许可服务 running、1055 open
+- [ ] `doctor` 报告 medini_exe exists=true、1055 open、workcopy_project exists=true
+- [ ] 许可服务 running、1055 open（机器重启后跑 `scripts/start-license.bat`）
 - [ ] `dry-run` 产出完整证据包（inputs/manifest/verification）
 - [ ] `run` 一例 OR 树 verdict=pass
+- [ ] `reopen-check` 一例四重校核 verdict=pass
 - 无任何遥测/在线字体/CDN 请求（标准库实现，无网络调用；仅 localhost:1055 socket 探测）
+
+## P1 工作副本工程（workcopy/AUTO-WC）
+
+`reopen-check` 需要一个可写的 medini 工程作为落盘目标。本仓自带
+`scripts/setup-workcopy.py`，从本机既有验证工程复制生成工作副本：
+
+```bash
+python scripts/setup-workcopy.py            # 默认源 → workcopy/AUTO-WC
+python scripts/setup-workcopy.py --force    # 重建
+```
+
+- 只读源工程；只写本仓 `workcopy/`（该目录已在 `.gitignore`，属构建产物）
+- 换机器时改 `--src` 指向本机任一有效 medini 工程（需含 `.project` + `.project.medini`）
+- 若副本缺失，`reopen-check` 诚实落 `blocked`（原因写入 manifest），不伪造结果
 
 ## 版本锁定
 

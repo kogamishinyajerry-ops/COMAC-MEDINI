@@ -8,5 +8,7 @@ runs/
 jobs/
 *.medini
 *.mprx
-.fta
-.fta_diagram
+*.fta
+*.fta_diagram
+# P1 工作副本工程：构建产物，由 scripts/setup-workcopy.py 重建
+workcopy/
