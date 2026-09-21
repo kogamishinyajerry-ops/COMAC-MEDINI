@@ -136,9 +136,13 @@ def test_cli_capabilities_honest():
     assert by_id["analyze_static_fta_probability"]["status"] == "verified"
     assert by_id["exponential_rate_to_probability"]["status"] == "verified"
     assert by_id["importance_measures"]["status"] == "verified"
+    assert by_id["local_baseline_run_store"]["status"] == "verified"
+    assert by_id["fmea_requirements_traceability"]["status"] == "verified"
     assert by_id["other_rate_models"]["status"] == "unsupported"
     assert by_id["dynamic_gates_repairs_dormant"]["status"] == "unsupported"
-    assert by_id["fmea_requirements_traceability"]["status"] == "unsupported"
+    for capability in caps:
+        if capability["status"] == "verified":
+            assert capability["evidence_ids"], f"{capability['capability_id']} claims verified with no evidence"
 
 
 def test_validation_rejects_missing_independence():

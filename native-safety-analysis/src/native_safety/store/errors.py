@@ -28,6 +28,12 @@ REVIEW_NOT_FOUND = "REVIEW_NOT_FOUND"
 RUN_NOT_FOUND = "RUN_NOT_FOUND"
 MODEL_NOT_FOUND = "MODEL_NOT_FOUND"
 REVIEW_STATE = "REVIEW_STATE"
+# FMEA base table (v2): rows, candidates and their revision ledger.
+FMEA_NOT_FOUND = "FMEA_NOT_FOUND"
+FMEA_STATE = "FMEA_STATE"
+# The row moved on since the proposal: the revision it targets is no longer the
+# current version. Mirrors BASELINE_CONFLICT for the FMEA side.
+FMEA_REVISION_CONFLICT = "FMEA_REVISION_CONFLICT"
 # A store subcommand argument is out of range or unknown.
 BAD_ARGUMENT = "STORE_BAD_ARGUMENT"
 # The declared actor may not approve (agents and the local CLI placeholder

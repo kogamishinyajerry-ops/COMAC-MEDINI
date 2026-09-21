@@ -1,4 +1,4 @@
-"""SQLite repository: baselines, runs, importance, reviews.
+"""SQLite repository: baselines, runs, importance, reviews, FMEA rows.
 
 Storage discipline (B_核心规划 §201-203, §231):
   - one writer, optimistic concurrency: a caller that names an expected
@@ -10,9 +10,26 @@ Storage discipline (B_核心规划 §201-203, §231):
     overwrite;
   - every stored number is an exact decimal or an exact `n/d` rational.
 
-This layer does no file IO and no validation: it receives already-validated
-domain objects and already-computed results. Front ends (CLI today, API/UI
-later) own the orchestration.
+FMEA discipline (B_核心规划 §102, §110, §198):
+  - an official row is never rewritten in place; a revision is a new version
+    and the older row is marked `superseded`, so the previous approved fact
+    stays readable;
+  - a candidate reaches the official table only through
+    propose -> decide(named human) -> apply; the same state vocabulary and the
+    same approval guard as `reviews` are reused, not re-invented;
+  - the original `source` (`inference` included) and the proposer's note on
+    what remains unconfirmed survive promotion, so a machine-proposed row never
+    loses its provenance;
+  - one row links 0..n basic events and one event is linked by 0..n rows. A
+    link that stops resolving after a baseline move is a REPORTABLE traceability
+    gap, not an integrity failure of the store — it is returned by
+    `dangling_fmea_links()` and counted in `status()`, never hidden.
+
+The FTA side of this layer does no validation: it receives already-validated
+domain objects and already-computed results. FMEA rows are the exception, and
+deliberately so: whether a linked event exists can only be decided against the
+store's current baseline, so `propose_fmea_candidate` completes validation here
+and records a rejected draft honestly instead of dropping it.
 """
 from __future__ import annotations
 
@@ -22,6 +39,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from fractions import Fraction
 
+from ..domain.errors import ModelError
+from ..domain.fmea import (
+    FMEA_SOURCES,
+    INFERENCE_SOURCE,
+    canonical_fmea_form,
+    fmea_content_hash,
+    fmea_provenance,
+    hash_canonical_fmea,
+    validate_fmea_row,
+)
 from ..domain.model import StaticFtaModel
 from ..domain.ratnum import exact_decimal, exact_decimal_or_fraction
 from ..domain.semantic_hash import (
@@ -48,6 +75,8 @@ NON_APPROVING_IDENTITIES = frozenset(
 
 RUN_STATUSES = frozenset({"succeeded", "failed", "unsupported", "resource_limited"})
 REVIEW_STATES = ("proposed", "invalid", "approved", "rejected", "applied")
+# The FMEA candidate queue uses the SAME state vocabulary as reviews.
+FMEA_CANDIDATE_STATES = REVIEW_STATES
 
 # Table -> columns forming a stable dump order (primary keys first).
 _DUMP_ORDER = {
@@ -57,7 +86,22 @@ _DUMP_ORDER = {
     "runs": ("run_id",),
     "importance": ("run_id", "event_id"),
     "reviews": ("review_id",),
+    "fmea_rows": ("model_id", "fmea_id", "version"),
+    "fmea_links": ("model_id", "fmea_id", "version", "event_id"),
+    "fmea_candidates": ("candidate_id",),
 }
+
+# Insertion order for restore(): every referenced row before its referrers.
+_RESTORE_ORDER = (
+    "models",
+    "baselines",
+    "runs",
+    "importance",
+    "reviews",
+    "fmea_rows",
+    "fmea_links",
+    "fmea_candidates",
+)
 
 IMPORTANCE_SORT_KEYS = (
     "fussell_vesely",
@@ -645,11 +689,379 @@ class SqliteRepository:
         )
         return self._stale_run_ids(model_id)
 
+    # ------------------------------------------------------------------ FMEA
+    def baseline_event_ids(self, model_id: str) -> frozenset[str] | None:
+        """Event ids of the model's CURRENT baseline, or None if it has none.
+
+        Read from the stored canonical form, not from a domain object, so a
+        traceability check never depends on re-loading a model file.
+        """
+        row = self.conn.execute(
+            "SELECT b.canonical_json AS c FROM baselines b"
+            " JOIN models m ON m.current_baseline_hash = b.baseline_hash"
+            " WHERE m.model_id=?",
+            (model_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        canonical = json.loads(row["c"])
+        return frozenset(event["id"] for event in canonical.get("basic_events", []))
+
+    def current_fmea_version(self, model_id: str, fmea_id: str) -> int | None:
+        row = self.conn.execute(
+            "SELECT MAX(version) AS v FROM fmea_rows"
+            " WHERE model_id=? AND fmea_id=? AND superseded=0",
+            (model_id, fmea_id),
+        ).fetchone()
+        return row["v"] if row and row["v"] is not None else None
+
+    def propose_fmea_candidate(
+        self,
+        *,
+        candidate_id: str,
+        raw_row: dict,
+        expected_baseline_hash: str,
+        proposed_by: str,
+        expected_version: int | None = None,
+        note: str | None = None,
+    ) -> dict:
+        """Record a draft FMEA row. Never promotes it.
+
+        Mirrors `propose_review`: a row that fails validation is still recorded,
+        with state `invalid` and the reason, so the rejected attempt is on the
+        audit trail instead of silently vanishing. A row that passes validation
+        is recorded as `proposed` and waits for a named human.
+        """
+        if not isinstance(raw_row, dict):
+            raise StoreError(errors.BAD_ARGUMENT, "an FMEA row must be a JSON object")
+        model_id = raw_row.get("model_id")
+        if not isinstance(model_id, str) or not model_id:
+            raise StoreError(
+                errors.BAD_ARGUMENT,
+                "the FMEA row must carry a model_id so it can be traced to a baseline",
+            )
+        observed = self.current_baseline_hash(model_id)
+        if observed is None:
+            raise StoreError(
+                errors.MODEL_NOT_FOUND,
+                f"model {model_id!r} has no baseline in this store; run `analyze --db` on it "
+                "first so an FMEA row can be traced against a baseline",
+            )
+        if expected_baseline_hash != observed:
+            raise StoreError(
+                errors.BASELINE_CONFLICT,
+                f"the row was written against baseline {expected_baseline_hash[:12]}… but the store "
+                f"holds {observed[:12]}… for model {model_id!r}; rebase the draft",
+            )
+
+        raw_fmea_id = raw_row.get("fmea_id")
+        known_events = self.baseline_event_ids(model_id) or frozenset()
+        try:
+            row = validate_fmea_row(raw_row, known_event_ids=known_events)
+        except ModelError as exc:
+            # A structurally bad draft is recorded, not dropped — but the
+            # revision ledger cannot be checked against an unreadable id.
+            state, code, message = "invalid", exc.code, exc.message
+            content_hash = canonical_json = provenance_json = None
+            fmea_id = raw_fmea_id if isinstance(raw_fmea_id, str) and raw_fmea_id else "(unreadable)"
+        else:
+            fmea_id = row.fmea_id
+            self._assert_fmea_revision_target(model_id, fmea_id, expected_version)
+            state, code, message = "proposed", None, None
+            content_hash = fmea_content_hash(row)
+            canonical_json = json.dumps(
+                canonical_fmea_form(row), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            )
+            # The descriptive sidecar is outside the hash but must survive
+            # promotion, so it is stored on the candidate as well.
+            provenance_json = json.dumps(
+                fmea_provenance(row), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            )
+
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO fmea_candidates(candidate_id, model_id, fmea_id, expected_version,"
+                " expected_baseline_hash, observed_baseline_hash, proposed_content_hash,"
+                " proposed_canonical_json, proposed_provenance_json, state, validation_code,"
+                " validation_message, note, proposed_by, created_utc)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (candidate_id, model_id, fmea_id, expected_version, expected_baseline_hash, observed,
+                 content_hash, canonical_json, provenance_json, state, code, message, note,
+                 proposed_by, _utc_now()),
+            )
+        return self.get_fmea_candidate(candidate_id)
+
+    def _assert_fmea_revision_target(
+        self, model_id: str, fmea_id: str, expected_version: int | None
+    ) -> None:
+        """A revision must name the exact version it revises; a new row must not."""
+        current = self.current_fmea_version(model_id, fmea_id)
+        if current is None:
+            if expected_version is not None:
+                raise StoreError(
+                    errors.FMEA_REVISION_CONFLICT,
+                    f"fmea_id {fmea_id!r} has no official row for model {model_id!r} yet, but "
+                    f"expected_version={expected_version} was declared; a first row must not "
+                    "declare a revision target",
+                )
+            return
+        if expected_version != current:
+            raise StoreError(
+                errors.FMEA_REVISION_CONFLICT,
+                f"fmea_id {fmea_id!r} is at version {current} for model {model_id!r}; a revision "
+                f"must declare expected_version={current} (it declared {expected_version!r}), "
+                "otherwise it would silently replace a fact someone else changed",
+            )
+
+    def get_fmea_candidate(self, candidate_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM fmea_candidates WHERE candidate_id=?", (candidate_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_fmea_candidates(
+        self, *, state: str | None = None, model_id: str | None = None
+    ) -> list[dict]:
+        sql, params, clauses = "SELECT * FROM fmea_candidates", [], []
+        if state is not None:
+            clauses.append("state=?")
+            params.append(state)
+        if model_id is not None:
+            clauses.append("model_id=?")
+            params.append(model_id)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY created_utc, candidate_id"
+        return [dict(r) for r in self.conn.execute(sql, params)]
+
+    def decide_fmea_candidate(
+        self, candidate_id: str, *, approve: bool, reviewer: str, note: str | None = None
+    ) -> dict:
+        """Approve or reject a draft. Requires an explicit named human."""
+        actor = _assert_approver(reviewer, "deciding an FMEA candidate")
+        record = self.get_fmea_candidate(candidate_id)
+        if record is None:
+            raise StoreError(errors.FMEA_NOT_FOUND, f"no FMEA candidate {candidate_id!r}")
+        if record["state"] != "proposed":
+            raise StoreError(
+                errors.FMEA_STATE,
+                f"FMEA candidate {candidate_id!r} is in state {record['state']!r}; only a "
+                "'proposed' draft can be decided",
+            )
+        if approve and record["proposed_content_hash"] is None:
+            raise StoreError(
+                errors.FMEA_STATE, f"FMEA candidate {candidate_id!r} carries no valid row"
+            )
+        target = "approved" if approve else "rejected"
+        with self.conn:
+            self.conn.execute(
+                "UPDATE fmea_candidates SET state=?, decided_by=?, decided_utc=?,"
+                " note=COALESCE(?, note) WHERE candidate_id=?",
+                (target, actor, _utc_now(), note, candidate_id),
+            )
+        return self.get_fmea_candidate(candidate_id)
+
+    def apply_fmea_candidate(self, candidate_id: str, *, reviewer: str) -> tuple[dict, dict]:
+        """Promote an approved draft into the official table.
+
+        Returns (candidate, promoted_row). The approval is bound to BOTH the
+        content hash and the baseline it was proposed against: if either moved,
+        the apply is refused and the approval must be re-decided.
+        """
+        actor = _assert_approver(reviewer, "applying an FMEA candidate")
+        record = self.get_fmea_candidate(candidate_id)
+        if record is None:
+            raise StoreError(errors.FMEA_NOT_FOUND, f"no FMEA candidate {candidate_id!r}")
+        if record["state"] != "approved":
+            raise StoreError(
+                errors.FMEA_STATE,
+                f"FMEA candidate {candidate_id!r} is in state {record['state']!r}; only an approved "
+                "draft can be applied",
+            )
+        model_id = record["model_id"]
+        observed = self.current_baseline_hash(model_id)
+        if record["expected_baseline_hash"] != observed:
+            raise StoreError(
+                errors.BASELINE_CONFLICT,
+                f"FMEA candidate {candidate_id!r} was approved against baseline "
+                f"{record['expected_baseline_hash'][:12]}… but the store now holds "
+                f"{(observed or '(none)')[:12]}…; the approval is stale and must be re-decided",
+            )
+        # Anchor exactly the approved canonical form: re-hash it so an
+        # out-of-band edit of the stored draft can never reach the official table.
+        canonical = json.loads(record["proposed_canonical_json"])
+        anchored = hash_canonical_fmea(canonical)
+        if anchored != record["proposed_content_hash"]:
+            raise StoreError(
+                errors.INTEGRITY,
+                f"stored draft {candidate_id!r} no longer hashes to its recorded hash; refusing to apply",
+            )
+        linked = tuple(canonical["linked_event_ids"])
+        event_ids = self.baseline_event_ids(model_id) or frozenset()
+        unknown = sorted(set(linked) - event_ids)
+        if unknown:
+            # Cannot happen while the baseline check above holds; if it does,
+            # the store contradicts itself and we stop rather than write it down.
+            raise StoreError(
+                errors.INTEGRITY,
+                f"draft {candidate_id!r} links event(s) {unknown} absent from the baseline it was "
+                "approved against; the store is inconsistent",
+            )
+
+        fmea_id = record["fmea_id"]
+        current = self.current_fmea_version(model_id, fmea_id)
+        self._assert_fmea_revision_target(model_id, fmea_id, record["expected_version"])
+        new_version = 1 if current is None else current + 1
+        now = _utc_now()
+        provenance = json.loads(record["proposed_provenance_json"] or "{}")
+
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO fmea_rows(model_id, fmea_id, version, component_id, function_id,"
+                " failure_mode, cause, local_effect, system_effect, controls_json, evidence_json,"
+                " requirement_ids_json, source, certainty, inference_note, content_hash,"
+                " canonical_json, validated_baseline_hash, superseded, superseded_by_version,"
+                " approved_by, approved_utc, created_utc, created_by)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,?,?,?,?)",
+                (
+                    model_id, fmea_id, new_version,
+                    canonical["component_id"], canonical["function_id"],
+                    canonical["failure_mode"], canonical["cause"],
+                    canonical["local_effect"], canonical["system_effect"],
+                    json.dumps(canonical["controls"], ensure_ascii=False),
+                    json.dumps(canonical["evidence"], ensure_ascii=False),
+                    json.dumps(canonical["requirement_ids"], ensure_ascii=False),
+                    canonical["source"],
+                    provenance.get("certainty", "") or "",
+                    provenance.get("inference_note", "") or "",
+                    anchored,
+                    record["proposed_canonical_json"],
+                    record["expected_baseline_hash"],
+                    actor, now, now, record["proposed_by"],
+                ),
+            )
+            for event_id in linked:
+                self.conn.execute(
+                    "INSERT INTO fmea_links(model_id, fmea_id, version, event_id) VALUES(?,?,?,?)",
+                    (model_id, fmea_id, new_version, event_id),
+                )
+            if current is not None:
+                self.conn.execute(
+                    "UPDATE fmea_rows SET superseded=1, superseded_by_version=?"
+                    " WHERE model_id=? AND fmea_id=? AND version=?",
+                    (new_version, model_id, fmea_id, current),
+                )
+            self.conn.execute(
+                "UPDATE fmea_candidates SET state='applied', applied_version=?, decided_by=?,"
+                " decided_utc=? WHERE candidate_id=?",
+                (new_version, actor, now, candidate_id),
+            )
+        return self.get_fmea_candidate(candidate_id), self.get_fmea_row(model_id, fmea_id, new_version)
+
+    def get_fmea_row(self, model_id: str, fmea_id: str, version: int | None = None) -> dict | None:
+        if version is None:
+            row = self.conn.execute(
+                "SELECT * FROM fmea_rows WHERE model_id=? AND fmea_id=? AND superseded=0",
+                (model_id, fmea_id),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT * FROM fmea_rows WHERE model_id=? AND fmea_id=? AND version=?",
+                (model_id, fmea_id, version),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_fmea_rows(
+        self, model_id: str | None = None, *, include_superseded: bool = False
+    ) -> list[dict]:
+        sql, params, clauses = "SELECT * FROM fmea_rows", [], []
+        if model_id is not None:
+            clauses.append("model_id=?")
+            params.append(model_id)
+        if not include_superseded:
+            clauses.append("superseded=0")
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY model_id, fmea_id, version"
+        return [dict(r) for r in self.conn.execute(sql, params)]
+
+    def fmea_links_of_row(self, model_id: str, fmea_id: str, version: int) -> list[str]:
+        return sorted(
+            r["event_id"]
+            for r in self.conn.execute(
+                "SELECT event_id FROM fmea_links WHERE model_id=? AND fmea_id=? AND version=?",
+                (model_id, fmea_id, version),
+            )
+        )
+
+    def fmea_rows_for_event(self, model_id: str, event_id: str) -> list[dict]:
+        """Traceability: every current official row that claims this event."""
+        rows = self.conn.execute(
+            "SELECT r.* FROM fmea_rows r JOIN fmea_links l"
+            " ON l.model_id=r.model_id AND l.fmea_id=r.fmea_id AND l.version=r.version"
+            " WHERE l.model_id=? AND l.event_id=? AND r.superseded=0"
+            " ORDER BY r.fmea_id",
+            (model_id, event_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def fmea_rows_by_component(self, model_id: str, component_id: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM fmea_rows WHERE model_id=? AND component_id=? AND superseded=0"
+            " ORDER BY fmea_id",
+            (model_id, component_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def dangling_fmea_links(self, model_id: str | None = None) -> list[dict]:
+        """Current rows whose linked event no longer exists in the current baseline.
+
+        This is a legitimate business state after a fault tree changes: the FMEA
+        text is human knowledge and must not evaporate, but the traceability gap
+        has to be visible. It is therefore reported here, not raised as a store
+        integrity failure.
+        """
+        sql = (
+            "SELECT DISTINCT l.model_id, l.fmea_id, l.version, l.event_id FROM fmea_links l"
+            " JOIN fmea_rows r ON r.model_id=l.model_id AND r.fmea_id=l.fmea_id"
+            " AND r.version=l.version WHERE r.superseded=0"
+        )
+        params: list[object] = []
+        if model_id is not None:
+            sql += " AND l.model_id=?"
+            params.append(model_id)
+        sql += " ORDER BY l.model_id, l.fmea_id, l.version, l.event_id"
+        cache: dict[str, frozenset[str]] = {}
+        out: list[dict] = []
+        for row in self.conn.execute(sql, params):
+            mid = row["model_id"]
+            if mid not in cache:
+                cache[mid] = self.baseline_event_ids(mid) or frozenset()
+            if row["event_id"] not in cache[mid]:
+                out.append(
+                    {
+                        "model_id": mid,
+                        "fmea_id": row["fmea_id"],
+                        "version": row["version"],
+                        "event_id": row["event_id"],
+                    }
+                )
+        return out
+
+    def fmea_requirements_of_row(self, row: dict) -> list[str]:
+        try:
+            return list(json.loads(row["requirement_ids_json"]))
+        except (TypeError, json.JSONDecodeError):
+            return []
+
     # ------------------------------------------------------------------ integrity
     def status(self) -> dict:
         counts = {
             table: self.conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
-            for table in ("models", "baselines", "runs", "importance", "reviews")
+            for table in (
+                "models", "baselines", "runs", "importance", "reviews",
+                "fmea_rows", "fmea_links", "fmea_candidates",
+            )
         }
         stale = self.conn.execute("SELECT COUNT(*) AS n FROM runs WHERE stale=1").fetchone()["n"]
         return {
@@ -660,6 +1072,14 @@ class SqliteRepository:
             "pending_reviews": self.conn.execute(
                 "SELECT COUNT(*) AS n FROM reviews WHERE state IN ('proposed','approved')"
             ).fetchone()["n"],
+            "current_fmea_rows": self.conn.execute(
+                "SELECT COUNT(*) AS n FROM fmea_rows WHERE superseded=0"
+            ).fetchone()["n"],
+            "pending_fmea_candidates": self.conn.execute(
+                "SELECT COUNT(*) AS n FROM fmea_candidates WHERE state IN ('proposed','approved')"
+            ).fetchone()["n"],
+            # A traceability gap, not an integrity failure: reported, never hidden.
+            "dangling_fmea_links": len(self.dangling_fmea_links()),
             "float_columns": audit_no_float_columns(self.conn),
         }
 
@@ -779,6 +1199,161 @@ class SqliteRepository:
             if row["state"] not in REVIEW_STATES:
                 problems.append(f"review state {row['state']!r} is not a known state")
 
+        problems.extend(self._verify_fmea())
+
+        return problems
+
+    def _verify_fmea(self) -> list[str]:
+        """Data-level integrity of the FMEA tables.
+
+        Deliberately NOT included: a link whose event disappeared after a
+        baseline move. That is a legitimate traceability gap reported by
+        `dangling_fmea_links()`, not a corruption of the store — folding it in
+        here would make `store verify` fail after a perfectly legal model
+        change and train everyone to ignore it.
+        """
+        problems: list[str] = []
+
+        # Every row: content re-hashes, JSON sidecars agree, provenance intact,
+        # the supersede chain is coherent, and exactly one version is current.
+        # The full version set is collected first: a successor is looked up while
+        # iterating an earlier version, so it cannot be discovered in place.
+        versions: set[tuple[str, str, int]] = {
+            (row["model_id"], row["fmea_id"], row["version"])
+            for row in self.conn.execute("SELECT model_id, fmea_id, version FROM fmea_rows")
+        }
+        current_seen: dict[tuple[str, str], int] = {}
+        for row in self.conn.execute("SELECT * FROM fmea_rows ORDER BY model_id, fmea_id, version"):
+            record = dict(row)
+            tag = f"fmea row {record['model_id']}/{record['fmea_id']}v{record['version']}"
+
+            canonical = None
+            try:
+                canonical = json.loads(record["canonical_json"])
+            except json.JSONDecodeError as exc:
+                problems.append(f"{tag}: canonical_json is not JSON ({exc})")
+            if canonical is not None:
+                recomputed = hash_canonical_fmea(canonical)
+                if recomputed != record["content_hash"]:
+                    problems.append(f"{tag}: canonical_json re-hashes to {recomputed[:12]}…")
+                for column, key in (
+                    ("fmea_id", "fmea_id"),
+                    ("component_id", "component_id"),
+                    ("function_id", "function_id"),
+                    ("failure_mode", "failure_mode"),
+                    ("cause", "cause"),
+                    ("local_effect", "local_effect"),
+                    ("system_effect", "system_effect"),
+                    ("source", "source"),
+                ):
+                    if canonical.get(key) != record[column]:
+                        problems.append(f"{tag}: column {column} disagrees with the canonical form")
+                for column, key in (
+                    ("controls_json", "controls"),
+                    ("evidence_json", "evidence"),
+                    ("requirement_ids_json", "requirement_ids"),
+                ):
+                    try:
+                        value = json.loads(record[column])
+                    except json.JSONDecodeError:
+                        problems.append(f"{tag}: {column} is not JSON")
+                        continue
+                    if value != canonical.get(key):
+                        problems.append(f"{tag}: {column} disagrees with the canonical form")
+
+            if record["source"] not in FMEA_SOURCES:
+                problems.append(f"{tag}: unknown source {record['source']!r}")
+            if record["source"] == INFERENCE_SOURCE and not (record["inference_note"] or "").strip():
+                problems.append(
+                    f"{tag}: a machine-inferred row was promoted without a record of what "
+                    "remains unconfirmed"
+                )
+            if not (record["approved_by"] or "").strip():
+                problems.append(f"{tag}: no approving human is recorded")
+            elif record["approved_by"].strip().lower() in NON_APPROVING_IDENTITIES:
+                problems.append(
+                    f"{tag}: approved by a non-approving identity {record['approved_by']!r}"
+                )
+            if not record["validated_baseline_hash"]:
+                problems.append(f"{tag}: no baseline recorded for its traceability check")
+
+            stored_links = sorted(
+                r["event_id"]
+                for r in self.conn.execute(
+                    "SELECT event_id FROM fmea_links WHERE model_id=? AND fmea_id=? AND version=?",
+                    (record["model_id"], record["fmea_id"], record["version"]),
+                )
+            )
+            if canonical is not None and stored_links != sorted(canonical.get("linked_event_ids", [])):
+                problems.append(f"{tag}: link rows disagree with the canonical form")
+
+            key = (record["model_id"], record["fmea_id"])
+            if record["superseded"]:
+                if record["superseded_by_version"] is None:
+                    problems.append(f"{tag}: marked superseded without a successor")
+                elif (record["model_id"], record["fmea_id"], record["superseded_by_version"]) not in versions:
+                    problems.append(f"{tag}: successor version does not exist")
+                elif record["superseded_by_version"] <= record["version"]:
+                    problems.append(f"{tag}: successor version is not newer")
+                if key in current_seen:
+                    problems.append(f"{tag}: a superseded version appears after the current one")
+            else:
+                if key in current_seen:
+                    problems.append(
+                        f"{tag}: more than one current version for {record['model_id']}/{record['fmea_id']}"
+                    )
+                current_seen[key] = record["version"]
+
+        # Orphan link rows cannot exist while foreign keys are enforced, but the
+        # check is the point: it is what makes "delete the row, keep the links"
+        # impossible rather than merely unlikely.
+        for row in self.conn.execute(
+            "SELECT l.model_id, l.fmea_id, l.version, l.event_id FROM fmea_links l"
+            " LEFT JOIN fmea_rows r ON r.model_id=l.model_id AND r.fmea_id=l.fmea_id"
+            " AND r.version=l.version WHERE r.version IS NULL"
+        ):
+            problems.append(
+                f"orphan fmea link {row['model_id']}/{row['fmea_id']}v{row['version']} -> {row['event_id']}"
+            )
+
+        current_baselines = {
+            r["model_id"]: r["current_baseline_hash"]
+            for r in self.conn.execute("SELECT model_id, current_baseline_hash FROM models")
+        }
+        for row in self.conn.execute("SELECT * FROM fmea_candidates ORDER BY candidate_id"):
+            record = dict(row)
+            tag = f"fmea candidate {record['candidate_id']!r}"
+            if record["state"] not in FMEA_CANDIDATE_STATES:
+                problems.append(f"{tag}: unknown state {record['state']!r}")
+                continue
+            if record["proposed_content_hash"] is not None:
+                try:
+                    canonical = json.loads(record["proposed_canonical_json"])
+                except (TypeError, json.JSONDecodeError):
+                    problems.append(f"{tag}: proposed_canonical_json is not JSON")
+                else:
+                    if hash_canonical_fmea(canonical) != record["proposed_content_hash"]:
+                        problems.append(f"{tag}: proposed canonical form no longer matches its hash")
+            elif record["state"] in ("approved", "applied"):
+                problems.append(f"{tag}: {record['state']} without a valid proposed row")
+            if record["state"] == "applied":
+                if record["applied_version"] is None:
+                    problems.append(f"{tag}: applied without a version")
+                elif (
+                    record["model_id"], record["fmea_id"], record["applied_version"]
+                ) not in versions:
+                    problems.append(f"{tag}: applied version does not exist in the official table")
+            if record["state"] in ("approved", "rejected", "applied"):
+                if not (record["decided_by"] or "").strip():
+                    problems.append(f"{tag}: decided without a named decider")
+                elif record["decided_by"].strip().lower() in NON_APPROVING_IDENTITIES:
+                    problems.append(f"{tag}: decided by a non-approving identity {record['decided_by']!r}")
+            if record["state"] in ("proposed", "invalid"):
+                if record["decided_by"] is not None:
+                    problems.append(f"{tag}: undecided state {record['state']!r} has a decider")
+            if record["model_id"] not in current_baselines:
+                problems.append(f"{tag}: model {record['model_id']!r} is not in the store")
+
         return problems
 
     def _verify_importance(self, run: dict, payload: dict) -> list[str]:
@@ -863,9 +1438,8 @@ class SqliteRepository:
     def restore(cls, path: str, dump: dict) -> SqliteRepository:
         """Build a repository at `path` from a dump produced by `dump()`."""
         repo = cls(path)
-        order = ("models", "baselines", "runs", "importance", "reviews")
         with repo.conn:
-            for name in order:
+            for name in _RESTORE_ORDER:
                 for row in dump["tables"].get(name, []):
                     columns = list(row)
                     placeholders = ", ".join(f":{c}" for c in columns)

@@ -19,6 +19,13 @@
 | **基线与 stale 独立重算** | ✅ 已执行 | 规范形式→SHA-256 独立重实现（53 份基线）；stale 由 `current_baseline_hash` 重算比对 |
 | **存储状态机属性** | ✅ 已执行 | 幂等/冲突/原子性/乐观并发/评审状态机/Agent 无批准权，7 类拒绝码实测触发 |
 | **验证自身有效性（突变测试）** | ✅ 已执行 | 9 种篡改（改数值/删行/改基线/翻 stale/加浮点列/存 REAL）**全部被检出** |
+| **FMEA 行独立重哈希** | ✅ 已执行 | verification/run_fmea_verification.py：15 当前行 + 2 被取代行由**原始列**独立重建 `fmea-canonical-v1` 规范形式，须等于入库 `canonical_json` 且重哈希等于 `content_hash` |
+| **FMEA 来源与确认** | ✅ 已执行 | 5 条推断行逐条验证 `inference_note` 非空；批准人不得是机器标识；每行必须可回溯到一份同内容哈希的 `applied` 候选 |
+| **FMEA 修订不可变** | ✅ 已执行 | 2 条被取代行的内容字节不变，仅 `superseded`/`superseded_by_version` 变化；后继版本必存在且更大；同名至多一个当前版本 |
+| **FMEA 追溯多对多** | ✅ 已执行 | 34 条关联（26 命中 / 8 悬空）由规范形式与关联表**双向**比对；悬空关联**报告并计数**，不判为完整性失败 |
+| **FMEA 状态机** | ✅ 已执行 | 独立复跑候选全生命周期：未批准不得应用、机器无批准权、已批准后基线移动即失效、非法草稿被记录为 `invalid`、修订必指名目标版本 |
+| **FMEA 突变测试** | ✅ 已执行 | 19 种篡改（改哈希/改规范形式/改标量列/改控制项/改需求/增删关联行/清空推断说明/非人类批准/无批准人/断后继链/植入第二当前版本/清空基线锚/改候选规范形式/非法状态/非人类决定/应用指向不存在版本/加 REAL 列/存 REAL）**全部被检出** |
+| **FMEA 存储无浮点审计** | ✅ 已执行 | 115 个新增表值 `typeof()` 扫描，零 REAL（与存储层同法） |
 | 第三方差分 | ❌ 未执行 | SCRAM 评估列为后续项（许可/GPL 审查先行） |
 | 专家 Gold Case | ❌ 未执行 | 需业务专家与脱敏模型（依赖启动会决策） |
 | 封存迁移任务 | ❌ 未执行 | 30 天范围 |
@@ -73,6 +80,23 @@ store verification
   population problems   : 0
 store verification: PASSED
 
+$ python verification/run_fmea_verification.py   # FMEA：原始列独立重建 + 重哈希
+mutation check (the checks above must be able to fail)
+  caught   19 / 19 tamperings
+fmea verification
+  models                : 5 with a recorded baseline
+  official rows         : 15 current, 2 superseded (all re-hashed from raw columns)
+  links checked         : 34 (26 resolved, 8 dangling — reported, not repaired)
+  many-to-many proof    : 8 events cited by >1 row, 12 rows citing >1 event
+  machine-inferred rows : 5 (each still states what is unconfirmed)
+  candidates            : 20 (17 applied, 1 rejected, 1 invalid, 1 pending)
+  storage values scanned: 115 (SQLite typeof — zero REAL expected)
+  refusals triggered    : APPROVAL_AUTHORITYx2, BASELINE_CONFLICTx1, FMEA_NOT_FOUNDx2,
+                          FMEA_REVISION_CONFLICTx4, FMEA_STATEx4, MODEL_NOT_FOUNDx1,
+                          STORE_BAD_ARGUMENTx1
+  population problems   : 0
+fmea verification: PASSED
+
 $ python run.py analyze examples/R01_rate_and.json --evidence-dir evidence --run-id r01_doc
 status: succeeded; model_schema 0.2.0; top_probability 1.997002664917588e-6; exit 0
   └ 证据包：manifest.json + inputs/ + results/ + reports/report.md + execution/
@@ -85,6 +109,18 @@ $ python run.py store  show   store.sqlite nope               → RUN_NOT_FOUND;
 $ python run.py review propose … --reviewer agent             → 记 proposed；基线不动
 $ python run.py review decide  … --approve --reviewer agent   → APPROVAL_AUTHORITY;    exit 2
 $ python run.py review apply   … --reviewer JerryKogami       → applied；旧 run 标 stale
+
+$ python run.py fmea propose   … --source inference --inference-note "…" --reviewer agent
+                                                              → 记 draft；正式表仍为空
+$ python run.py fmea propose   … --source inference            → FMEA_SOURCE;          exit 2
+$ python run.py fmea decide    … --approve --reviewer agent    → APPROVAL_AUTHORITY;   exit 2
+$ python run.py fmea apply     … --reviewer JerryKogami        → applied；推断说明原样保留
+$ python run.py fmea rows      <db> --model MOD              → 仅当前版本；--all 含被取代
+$ python run.py fmea trace     <db> --event A                 → 引用 A 的全部行
+$ python run.py fmea trace     <db> --component C01           → 该组件的全部行
+$ python run.py fmea trace     <db> --dangling                → 悬空关联（基线移动后失联）
+$ python run.py fmea apply     … （批准后基线被移动）           → BASELINE_CONFLICT;   exit 2
+$ python run.py store  verify  store.sqlite                   → problems=[]（悬空关联不算损坏）; exit 0
 
 $ python run.py validate <repairable:true>      → RATE_UNSUPPORTED; exit 3
 $ python run.py validate <模型 weibull>          → RATE_UNSUPPORTED; exit 3
@@ -200,6 +236,81 @@ $ python run.py validate <lambda_unit=1/s>       → RATE_UNITS;       exit 2
 
 `store.verify()` 最初只在"某 run 一条重要度行都没有"时报错。测试用例 `test_verify_detects_corruption[DELETE FROM importance …]` 删掉**一行**（还剩两行）时，剩余行彼此完全自洽，`verify()` 却报干净。修复：用 run 行里已存的 `variable_count` 与行数比对，并要求 `rank_in_run` 是连续的 0..n−1。这正是"自洽 ≠ 完整"的实例——独立 oracle 一开始就抓住了它，因为 oracle 知道应该有几个事件。
 
+## FMEA 基础表与追溯的独立性证据链
+
+FMEA 的"正确性"同样不能靠"自己和自己一致"。`verification/run_fmea_verification.py` 同样**不导入 store 模块**，只用 raw `sqlite3` 打开库文件，从**列级原值**（标量列、JSON 侧列、`fmea_links` 关联行）重新拼装对象、独立重实现 `fmea-canonical-v1` 规范化与 SHA-256，再与库中 `canonical_json`/`content_hash` 三方比对。
+
+| 检查维度 | 被测对象（`store/`） | 独立验证 |
+| --- | --- | --- |
+| 行规范形式 | `fmea_rows` 标量列 + JSON 侧列 + `fmea_links` | 脚本内**重新实现**规范化（集合并排序、字段裁剪）→ 重建 JSON，逐字节比对 |
+| 内容哈希 | `fmea_rows.content_hash` | 对重建的规范形式**独立重哈希** SHA-256 |
+| 列↔规范形式一致性 | 全部标量列 | 重建对象与存储对象逐字段比对（差异字段名如实报出） |
+| 来源与确认 | `source` / `canonical_json.inference_note` | 推断行说明非空；来源词表校验 |
+| 批准权威 | `approved_by` | 脚本内**自带一份** `NON_APPROVING` 名单（不 import 生产常量）逐行判定 |
+| 可回溯性 | `fmea_candidates` | 每行须存在一份 `state='applied'` 且 `proposed_content_hash` 相等的候选 |
+| 修订链 | `superseded` / `superseded_by_version` | 后继存在且版本更大；同名至多一个当前版本 |
+| 追溯完整性 | `fmea_links` ↔ `canonical_json.linked_event_ids` | 双向集合比对；对当前基线事件集解析，悬空项**返回**而非失败 |
+| 无浮点 | 三张 FMEA 表 | SQLite `typeof()` 逐值扫描 |
+| 状态机 | 候选生命周期 | 在**临时库**上独立复跑，7 类拒绝码逐一实测触发 |
+
+判据同样**逐值精确相等、无容差**：FMEA 侧不含超越函数，任何差异都是缺陷。
+
+### 突变测试：证明这些 FMEA 检查真的会失败
+
+每次运行对一份副本施加 **19 种**篡改，要求全部被检出：
+
+| 篡改 | 被哪条检查抓住 |
+| --- | --- |
+| 改写一行的 `content_hash` | 规范形式独立重哈希不匹配 |
+| 就地改写一行的 `canonical_json` | 原始列重建出不同的规范形式 |
+| 改写一个标量列（与规范形式不符） | 同上（报出差异字段名） |
+| 改写控制项侧列 | 同上（`controls`） |
+| 改写需求列表 | 同上（`requirement_ids`） |
+| 删除一条关联行 | 同上（`linked_event_ids`） |
+| 增加一条关联行 | 同上（`linked_event_ids`） |
+| 清空推断行的 `inference_note` | "机器推断却未说明待确认事项" |
+| 用非批准身份批准一行 | "由非可批准身份批准" |
+| 抹掉批准人 | "无批准人" |
+| 断开被取代行的后继 | "被取代但无后继" |
+| 为同一 `fmea_id` 植入第二个当前版本 | "同名多个当前版本" |
+| 清空行的 `validated_baseline_hash` | "无基线锚" |
+| 改写候选的 `proposed_canonical_json` | 候选规范形式与记录的哈希不符 |
+| 把候选状态改为未知值 | 该行无法回溯到 `applied` 候选 |
+| 用非批准身份决定候选 | 同上 |
+| 让 `applied` 候选指向不存在的版本 | "应用版本不存在" |
+| 在 schema 中加一个 REAL 列 | 声明类型审计 |
+| 存入一个 REAL 值 | `typeof()` 逐值扫描 |
+
+实测 **19/19 全部检出**。任何一条"未被检出"都会让脚本判为失败——因为那意味着对应检查是装饰性的。
+
+### 覆盖度与真空度闸门（说明 FMEA 的绿不是空绿）
+
+脚本在**结束时强制自检**：拒绝码种类必须 ≥7、悬空关联集合必须非空，否则直接判失败（防止"温室种群"把绿变成空绿）。本次实测：5 个含基线模型、15 当前行 + 2 被取代行、34 条关联（26 命中 / **8 悬空**）、8 个事件被多于一行引用、12 行引用多于一个事件、5 条机器推断行、20 个候选（17 applied / 1 rejected / 1 invalid / 1 pending）、115 个存储值扫描、7 类拒绝码实际触发。
+
+### 一个由测试抓出的真实缺陷（FMEA）
+
+`_verify_fmea()` 最初把"后继版本不存在"误报为完整性失败——因为 `versions` 集合是在**行循环内部**累积的，当遍历到 v1 行时，尚未加入 v2 行，于是一个正常的历史版本被判为"后继缺失"。修复：在循环前**先做一遍全表扫描**收集全部 `(model_id, fmea_id, version)`。
+
+同样在设计 `apply_fmea_candidate` 时发现：`certainty` 与 `inference_note` 被**刻意排除在哈希之外**（描述性），因此无法从规范形式反推——若不在提案时把 provenance 一并落盘，批准应用后会**静默丢失**推断说明。修复：候选表新增 `proposed_provenance_json` 列，提案时存入 `fmea_provenance(row)`，应用时读回。
+
+## FMEA 基础表不变量（tests/test_fmea.py，67 项）
+
+34. 身份是**稳定标识符**，不是显示名：改 `failure_mode` 文案不改 `fmea_id`，行身份不变
+35. 行 ↔ 基本事件是**多对多**：一行可关联多事件，一事件可被多行引用，**永不强制一对一**
+36. `certainty` 与 `inference_note` 在**哈希之外**：仅改这两项（`dataclasses.replace`）不改变 `content_hash`
+37. 关联集合**顺序不敏感**：`linked_event_ids` 重排不改变哈希；控制项/证据/需求同理
+38. `source='inference'` 而无 `inference_note` → 校验拒绝（`FMEA_SOURCE`）：推断**永不被记为定论**
+39. 未知事件 id 关联 → 拒绝（`FMEA_LINK`）；空关联行**允许**（未关联 ≠ 非法）
+40. 草稿单独存在**不触碰正式表**：`propose` 后正式行数不变，`list_fmea_rows` 仍为空
+41. 机器身份不能决定或应用（`APPROVAL_AUTHORITY`）；推断行**仍须人类批准**
+42. 修订是**新版本**：应用后旧版内容字节不变，仅 `superseded`/`superseded_by_version` 改变；同名至多一个当前版本
+43. 修订必须**指名目标版本**（`expected_version`），指向被取代版本 → 拒绝
+44. 批准**同时绑定基线与内容**：批准后基线被移动 → `apply` 以 `BASELINE_CONFLICT` 拒绝该过期批准
+45. 悬空关联（基线移动后不再解析）**只报告与计数**，`store verify` 保持干净（合法的模型变更不得读作损坏）
+46. 全程 `store verify` 干净：从草稿到应用、含修订与悬空，`verify()` 始终 `problems=[]`
+47. 往返：`dump()` == `restore()`，悬空集合保持一致
+48. 未定义项从不被占位替代；无浮点列、无 REAL 值
+
 ## 变形测试（不变量，全部通过）
 
 1. 输入重排（事件/门数组倒序）→ 概率与割集不变
@@ -262,4 +373,7 @@ rate 转换另有独立不变量（tests/test_rate_model.py）：λ 单调、t �
 - **重要度未定义情形的处置**：`Q=0` 或 `q−ᵢ=0` 时 FV/RAW/RRW 数学上无定义，本版本如实输出 `null` + reason，不做任何近似替代。若工程上需要"退化值"，需先由安全专家给出语义规格
 - **基线与并发策略**：一期单写者 + 乐观并发（写入时校验预期基线哈希），不做锁。团队版（PostgreSQL）需重新裁决并发模型与冲突提示粒度
 - **"可批准身份"名单**：当前以显式 `--reviewer` 具名 + 一组保留标识（agent/assistant/ai/bot/local-cli/unknown）做拒绝判断。正式阶段应接认证层，由身份系统而非字符串判定授权
-- **变更提案的粒度**：当前提案是一份完整模型（无结构化 patch 语言）。是否需要对象级 patch 与影响范围分析，待 B05（FMEA/追溯）之后再定
+- **FMEA 表口径确认**：本版本刻意**不含**严重度/发生度/探测度/RPN，也不产生 FMECA/FMEDA 结论。若工程上需要风险排序，应作为**新增字段与新增语义**并单独验证，而非就地扩展本表
+- **推断行的确认流程**：`source='inference'` 的行必须写 `inference_note` 且须人类批准方可入表，但"谁来确认、确认到什么程度算充分"需安全专家给出规程
+- **悬空关联的处置**：基线移动后失联的关联只报告与计数、不判为损坏。是否需要"重新挂接"或"显式断开"的操作，待确认
+- **变更提案的粒度**：当前提案是一份完整模型（无结构化 patch 语言）。**B05（FMEA/追溯）落地后**该问题仍待定：是否需要对象级 patch 与影响范围分析，转由后续步骤评估

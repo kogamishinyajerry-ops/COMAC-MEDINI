@@ -4,23 +4,24 @@
 
 ## 已实现
 
-- `src/native_safety/domain/`：模型数据类、错误码体系（15 类，含 rate 三类）、语义校验（引用/循环/重复 ID/概率词法与范围/失效率闸门/K_OF_N 边界/独立性声明/全图环检测）、**恒定失效率→任务概率转换**（`rate_model.py`，高精度 Decimal + 无相消泰勒级数）、规范化语义哈希（canonical-v1，含 rate 来源）、**共享十进制定点渲染**（`ratnum.py`，5 处重复实现已收拢为一处）
+- `src/native_safety/domain/`：模型数据类、错误码体系（20 类，含 rate 三类 + FMEA 四类）、语义校验（引用/循环/重复 ID/概率词法与范围/失效率闸门/K_OF_N 边界/独立性声明/全图环检测）、**恒定失效率→任务概率转换**（`rate_model.py`，高精度 Decimal + 无相消泰勒级数）、规范化语义哈希（canonical-v1，含 rate 来源）、**共享十进制定点渲染**（`ratnum.py`，5 处重复实现已收拢为一处）、**FMEA 领域层**（`fmea.py`：`FmeaRow`/`EvidenceRef`、`fmea-canonical-v1` 规范形式与哈希、来源与推断说明校验、稳定标识符身份）
 - `src/native_safety/kernel/`：ROBDD（唯一节点表、计算缓存、迭代 apply、mark-sweep 压实、节点上限）、平衡合并编译、同门扁平化（链式 O(n²)→近线性）、K_OF_N 阈值递推、**共享概率表**（`_probability_table`，同时供概率与重要度）、位掩码最小割集（路径上限+诚实截断标记）、**重要度内核**（`importance.py`：单遍自顶向下 reach + 差分数组累计跨层质量，O(#节点) 得到全部变量的共因子；每事件内建恒等式自检；未定义项如实上报）
 - `src/native_safety/adapters/`：防御性 JSON 读取、契约词法概率输出
 - `src/native_safety/evidence/`：run_<id>/ 证据包（manifest/inputs/results/reports/execution，SHA-256 工件哈希）
-- `src/native_safety/store/`：**持久化适配层**（`schema.py` 迁移注册表 + 无浮点列审计；`repository.py` 五表仓储 + 幂等 run + 乐观并发 + stale 派生 + 评审状态机 + dump/restore + 自校验 `verify()`；`errors.py` 十类存储错误码）。单文件 SQLite，只依赖标准库 `sqlite3`，不做校验、不做文件 IO
-- `src/native_safety/cli/`：validate / analyze / capabilities / **store**（init/status/runs/show/baseline/adopt-baseline/important/verify/export）/ **review**（propose/list/show/decide/apply），退出码 0/2/3/4/5；rate 模型额外输出 `rate_provenance[]`（每事件含 `interpretation`）、`probability_interpretation` 与强制非 per-flight-hour 警告；**`--importance {auto,on,off}`** 与 `importance_measures[]`（按 FV 降序）/`importance_status`/`importance_conventions`/`importance_exact`，报告含重要度表；`analyze --db` 增加 `store{status,...}` 块（被拒时如实标 refused 且退出码非零，但保留分析结果）
+- `src/native_safety/store/`：**持久化适配层**（`schema.py` 迁移注册表 + 无浮点列审计，**schema v2 八表**；`repository.py` 仓储 + 幂等 run + 乐观并发 + stale 派生 + 评审状态机 + **FMEA 行/关联/候选闭环与追溯** + dump/restore + 自校验 `verify()`；`errors.py` 十四类存储错误码）。单文件 SQLite，只依赖标准库 `sqlite3`，不做校验、不做文件 IO
+- `src/native_safety/cli/`：validate / analyze / capabilities / **store**（init/status/runs/show/baseline/adopt-baseline/important/verify/export）/ **review**（propose/list/show/decide/apply）/ **fmea**（rows/candidates/show/propose/decide/apply/trace），退出码 0/2/3/4/5；rate 模型额外输出 `rate_provenance[]`（每事件含 `interpretation`）、`probability_interpretation` 与强制非 per-flight-hour 警告；**`--importance {auto,on,off}`** 与 `importance_measures[]`（按 FV 降序）/`importance_status`/`importance_conventions`/`importance_exact`，报告含重要度表；`analyze --db` 增加 `store{status,...}` 块（被拒时如实标 refused 且退出码非零，但保留分析结果）
 - `verification/`：独立参考实现（真值表穷举 + Fraction，与生产内核零共享）、210 模型结构交叉对照脚本、**120 模型 rate 转换交叉对照脚本**（独立有理级数 oracle）、**120 模型重要度交叉对照脚本**（独立共因子 oracle + 真值表支持集判定，4072 项精确相等，附覆盖度统计）、**存储验证脚本**（raw sqlite3 读回 + 2ⁿ oracle 重推导 + 独立重哈希 + 9 项突变测试 + 往返测试）
 - `tests/`：141 项测试（15 种子 + 12 结构拒绝 + 10 rate 拒绝 + 8 变形不变量 + rate 数值/边界不变量 + 22 项重要度 + **53 项存储（schema/精确性/幂等/冲突/原子性/并发/stale/评审闭环/Agent 守卫/完整性/往返/CLI）** + 资源上限 + CLI/证据包集成 + 哈希稳定性 + 交叉验证）
 
 ## 实际执行并通过（2026-09-21）
 
 ```text
-python -m pytest tests/ -q                       → 141 passed in 23.6s  (venv 3.13.12, pytest 9.1.1)
+python -m pytest tests/ -q                       → 208 passed in ~38s    (venv 3.13.12, pytest 9.1.1)
 python verification/run_cross_check.py           → 210/210 passed       (结构，Fraction 精确相等)
 python verification/run_rate_cross_check.py      → 120/120 passed       (rate，tolerance 1e-30，max diff 3.79e-41)
 python verification/run_importance_cross_check.py→ 120/120 passed       (重要度，4072 项精确相等，无容差)
 python verification/run_store_verification.py    → PASSED               (存储，1362 项重推导精确相等；9/9 突变被检出)
+python verification/run_fmea_verification.py     → PASSED               (FMEA，17 行独立重哈希；34 条关联；19/19 突变被检出)
 python run.py analyze …R01_rate_and… --evidence-dir … → succeeded, schema 0.2.0, p=1.997002664917588e-6, exit 0
 python run.py analyze …M03…                      → status succeeded, p=0.044, exit 0, importance ranked A/C/B
 python run.py analyze …M03… --importance off     → importance_measures null + 明确警告, exit 0
@@ -29,6 +30,11 @@ python run.py analyze …M02… --db store.sqlite --run-id=<已用> → RUN_ID_C
 python run.py store verify store.sqlite          → problems=[], exit 0
 python run.py review decide … --reviewer agent   → APPROVAL_AUTHORITY, exit 2
 python run.py review apply  … --reviewer JerryKogami → applied, 旧 run 标 stale, exit 0
+python run.py fmea propose … --source inference --inference-note "…" → draft，正式表仍为空, exit 0
+python run.py fmea propose … --source inference（缺说明）          → FMEA_SOURCE, exit 2
+python run.py fmea decide  … --reviewer agent    → APPROVAL_AUTHORITY, exit 2
+python run.py fmea apply   … --reviewer JerryKogami → applied，推断说明原样保留, exit 0
+python run.py fmea trace   store.sqlite --dangling → 悬空关联如实列出（不改 verify 结论）
 python run.py validate …N05…                     → unsupported, exit 3
 python run.py validate <repairable:true / weibull> → RATE_UNSUPPORTED, exit 3
 python run.py validate <v0.1.0 含 rate>           → VERSION, exit 2
@@ -46,7 +52,9 @@ n=400 → 0.13s；n=800 → 0.52s；n=1500 → 1.63s；n=3000 → 7.88s（BDD �
 - 第三方差分（SCRAM）：BLOCKED: GPL-3.0 商用合规裁决
 - 业务 Gold Case：BLOCKED: 等待启动会确定专家与脱敏模型
 - 真实 Medini 对照：不在 B 线范围（A 线职责；对照属联合验收）
-- FMEA 基础表 / API / Web：未开始（30 天工作包序列；下一步为 B05 FMEA 基础表）
+- **FMEA 基础表与追溯：已实现并验证（B05）**；FMECA 风险排序（严重度/发生度/探测度/RPN）**明确不在范围**
+- 重要度→FMEA 联动的自动候选生成：未开始（需在 B05 之上叠加，仍须人工批准入表）
+- API / Web 工作台：未开始（30 天工作包序列；先 CLI → API → 再 UI）
 - PostgreSQL 迁移脚本：未开始（一期已备 `store export` 往返；团队版阶段）
 - 结构化 patch 语言与 revert 命令：未开始（当前提案为整份模型，回退＝再提案旧语义）
 - 适航/工具鉴定材料：未开始，本版本不作此声明
@@ -74,6 +82,7 @@ n=400 → 0.13s；n=800 → 0.52s；n=1500 → 1.63s；n=3000 → 7.88s（BDD �
 | 3. 小规模模型经验证的最小割集（未实现则明确排除） | ✅（已实现并验证；截断诚实标记） |
 | 4. 可读报告 + 结构化证据清单 | ✅（report.md + manifest.json 五件套） |
 | 5. 独立参考、种子、负例、变形验证；无 Medini/A 线/LLM/网络重跑 | ✅（全部本地标准库执行） |
+| 6. FMEA 基础表 + 与基本事件的追溯（B05） | ✅（多对多关联；推断行强制说明且须人工批准；修订即新版本；独立验证 19/19 突变检出） |
 
 首 72 小时完成定义（无 UI）：读取 JSON、校验 AND/OR 图、独立计算概率、结构化输出、最小范围报告、测试通过、重复事件例题通过、未知门拒绝 —— **全部满足**。
 

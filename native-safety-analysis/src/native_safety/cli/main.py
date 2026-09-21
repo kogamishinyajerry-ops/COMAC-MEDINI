@@ -32,7 +32,7 @@ from ..kernel.solve import (
     solve_model,
 )
 from ..store import errors as store_err
-from ..store import IMPORTANCE_SORT_KEYS, SqliteRepository
+from ..store import FMEA_CANDIDATE_STATES, IMPORTANCE_SORT_KEYS, SqliteRepository
 from ..store.errors import StoreError
 
 EXIT_OK = 0
@@ -623,10 +623,28 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
             },
             {
                 "capability_id": "fmea_requirements_traceability",
-                "status": "unsupported",
-                "method": "not implemented in v0.1.0",
-                "restrictions": ["30-day scope; see docs/NEXT_STEPS.md"],
-                "evidence_ids": [],
+                "status": "verified",
+                "method": "FMEA base table (component / function / failure mode / cause / local and "
+                          "upper-level effect / controls / evidence) with many-to-many links to basic "
+                          "events and to requirement ids; every row reaches the official table only "
+                          "through propose -> decide -> apply under a named human",
+                "restrictions": [
+                    "base FMEA table only: no severity / occurrence / detection / RPN — those are "
+                    "FMECA extensions and are not implemented",
+                    "component / function / requirement ids are stable identifiers carried on the row; "
+                    "there is no separate requirement or component object yet",
+                    "a row whose source is 'inference' must state what remains unconfirmed, and the "
+                    "original source survives promotion (a machine-proposed row is never laundered)",
+                    "an official row is never rewritten in place: a revision is a new version and the "
+                    "previous one is marked superseded and stays readable",
+                    "links are checked against the fault-tree baseline the draft was proposed "
+                    "against; a link that stops resolving after a baseline change is reported as a "
+                    "traceability gap, not silently repaired or deleted",
+                ],
+                "evidence_ids": [
+                    "tests/test_fmea.py",
+                    "verification/run_fmea_verification.py",
+                ],
             },
         ],
     }
@@ -892,6 +910,156 @@ def cmd_review(args: argparse.Namespace) -> int:
         return _store_refusal("STORE_IO", str(exc))
 
 
+# --------------------------------------------------------------------------
+# fmea: the FMEA base table and its traceability links
+# --------------------------------------------------------------------------
+
+
+_FMEA_ROW_FIELDS = (
+    "model_id", "fmea_id", "version", "component_id", "function_id", "failure_mode", "cause",
+    "local_effect", "system_effect", "source", "certainty", "inference_note", "content_hash",
+    "validated_baseline_hash", "superseded", "superseded_by_version", "approved_by", "approved_utc",
+    "created_utc", "created_by",
+)
+
+
+def _fmea_row_view(row: dict, linked_event_ids: list[str] | None = None) -> dict:
+    """Decode a stored FMEA row for display (JSON sidecars parsed, types clean)."""
+    view = {field: row[field] for field in _FMEA_ROW_FIELDS if field in row}
+    view["superseded"] = bool(view.get("superseded"))
+    for column, key in (
+        ("controls_json", "controls"),
+        ("evidence_json", "evidence"),
+        ("requirement_ids_json", "requirement_ids"),
+    ):
+        try:
+            view[key] = json.loads(row[column])
+        except (KeyError, TypeError, json.JSONDecodeError):
+            view[key] = None
+    if linked_event_ids is not None:
+        view["linked_event_ids"] = list(linked_event_ids)
+    return view
+
+
+def cmd_fmea(args: argparse.Namespace) -> int:
+    command = args.fmea_command
+    try:
+        if command == "rows":
+            with SqliteRepository(args.db) as repo:
+                rows = repo.list_fmea_rows(args.model, include_superseded=args.include_superseded)
+                view = [
+                    _fmea_row_view(r, repo.fmea_links_of_row(r["model_id"], r["fmea_id"], r["version"]))
+                    for r in rows
+                ]
+            _emit(_store_payload(
+                "fmea rows", status="ok", count=len(view),
+                official_table_note=(
+                    "these are approved rows only; a machine-proposed draft lives in the candidate "
+                    "queue until a named human confirms it"
+                ),
+                rows=view,
+            ))
+            return EXIT_OK
+
+        if command == "candidates":
+            with SqliteRepository(args.db) as repo:
+                records = repo.list_fmea_candidates(state=args.state, model_id=args.model)
+            _emit(_store_payload("fmea candidates", status="ok", count=len(records), candidates=records))
+            return EXIT_OK
+
+        if command == "show":
+            with SqliteRepository(args.db) as repo:
+                record = repo.get_fmea_candidate(args.candidate_id)
+            if record is None:
+                return _store_refusal(store_err.FMEA_NOT_FOUND, f"no FMEA candidate {args.candidate_id!r}")
+            _emit(_store_payload("fmea show", status="ok", candidate=record))
+            return EXIT_OK
+
+        if command == "propose":
+            try:
+                raw_row = json.loads(Path(args.row).read_text(encoding="utf-8"))
+            except OSError as exc:
+                return _store_refusal("STORE_IO", str(exc))
+            except json.JSONDecodeError as exc:
+                return _store_refusal(err.FMEA_INPUTS, f"{args.row!r} is not valid JSON ({exc})")
+            with SqliteRepository(args.db) as repo:
+                record = repo.propose_fmea_candidate(
+                    candidate_id=args.candidate_id,
+                    raw_row=raw_row,
+                    expected_baseline_hash=args.expected_baseline_hash,
+                    proposed_by=args.reviewer,
+                    expected_version=args.expected_version,
+                    note=args.note,
+                )
+            _emit(_store_payload(
+                "fmea propose", status="ok", candidate=record,
+                note="a draft never enters the official table by itself; approval and application are "
+                     "separate, human-authorised steps",
+            ))
+            return EXIT_OK
+
+        if command == "decide":
+            with SqliteRepository(args.db) as repo:
+                record = repo.decide_fmea_candidate(
+                    args.candidate_id, approve=args.approve, reviewer=args.reviewer, note=args.note
+                )
+            _emit(_store_payload(
+                "fmea decide", status="ok", candidate=record,
+                note="a decision does not touch the official table; apply it explicitly",
+            ))
+            return EXIT_OK
+
+        if command == "apply":
+            with SqliteRepository(args.db) as repo:
+                record, promoted = repo.apply_fmea_candidate(args.candidate_id, reviewer=args.reviewer)
+                linked = repo.fmea_links_of_row(
+                    promoted["model_id"], promoted["fmea_id"], promoted["version"]
+                )
+            _emit(_store_payload(
+                "fmea apply", status="ok", candidate=record,
+                row=_fmea_row_view(promoted, linked),
+                note="the draft is now an official row; any earlier version of the same fmea_id is "
+                     "marked superseded and stays readable",
+            ))
+            return EXIT_OK
+
+        if command == "trace":
+            with SqliteRepository(args.db) as repo:
+                if args.dangling:
+                    rows = repo.dangling_fmea_links(args.model)
+                    _emit(_store_payload(
+                        "fmea trace", status="ok", mode="dangling", count=len(rows),
+                        dangling=rows,
+                        note="a linked event that no longer exists in the current baseline is a "
+                             "traceability gap, not a corrupted store: the FMEA text is human "
+                             "knowledge and is never deleted automatically",
+                    ))
+                    return EXIT_OK
+                if args.event:
+                    rows = repo.fmea_rows_for_event(args.model, args.event)
+                    mode, key = "event", args.event
+                else:
+                    rows = repo.fmea_rows_by_component(args.model, args.component)
+                    mode, key = "component", args.component
+                view = [
+                    _fmea_row_view(r, repo.fmea_links_of_row(r["model_id"], r["fmea_id"], r["version"]))
+                    for r in rows
+                ]
+            _emit(_store_payload(
+                "fmea trace", status="ok", mode=mode, model_id=args.model, key=key,
+                count=len(view), rows=view,
+                note="many-to-many: one row may cite several events and one event may be cited by "
+                     "several rows; the association is never forced to be one-to-one",
+            ))
+            return EXIT_OK
+
+        raise StoreError(store_err.BAD_ARGUMENT, f"unknown fmea command {command!r}")
+    except StoreError as exc:
+        return _store_refusal(exc.code, exc.message)
+    except OSError as exc:
+        return _store_refusal("STORE_IO", str(exc))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="native-safety",
@@ -1026,6 +1194,69 @@ def build_parser() -> argparse.ArgumentParser:
     p_r.add_argument("review_id")
     p_r.add_argument("--reviewer", default=None)
     p_r.set_defaults(func=cmd_review)
+
+    # ---- fmea ------------------------------------------------------------
+    p_fmea = sub.add_parser(
+        "fmea", help="FMEA base table and traceability (many-to-many with basic events)"
+    )
+    fmea_sub = p_fmea.add_subparsers(dest="fmea_command", required=True)
+
+    p_f = fmea_sub.add_parser("rows", help="the official FMEA table (approved rows only)")
+    p_f.add_argument("db")
+    p_f.add_argument("--model", default=None)
+    p_f.add_argument("--include-superseded", action="store_true",
+                     help="include versions replaced by a revision")
+    p_f.set_defaults(func=cmd_fmea)
+
+    p_f = fmea_sub.add_parser("candidates", help="the draft queue waiting on a human")
+    p_f.add_argument("db")
+    p_f.add_argument("--state", default=None, choices=list(FMEA_CANDIDATE_STATES))
+    p_f.add_argument("--model", default=None)
+    p_f.set_defaults(func=cmd_fmea)
+
+    p_f = fmea_sub.add_parser("show", help="show one draft")
+    p_f.add_argument("db")
+    p_f.add_argument("candidate_id")
+    p_f.set_defaults(func=cmd_fmea)
+
+    p_f = fmea_sub.add_parser("propose", help="record a draft FMEA row (never applies it)")
+    p_f.add_argument("db")
+    p_f.add_argument("row", help="path to a JSON FMEA row")
+    p_f.add_argument("--candidate-id", required=True)
+    p_f.add_argument("--expected-baseline-hash", required=True,
+                     help="optimistic concurrency: the fault-tree baseline this row is traced against")
+    p_f.add_argument("--reviewer", default="agent",
+                     help="who proposes (default: agent — an agent may propose but never approve)")
+    p_f.add_argument("--expected-version", type=int, default=None,
+                     help="the exact version this draft revises; omit for a brand-new row")
+    p_f.add_argument("--note", default=None)
+    p_f.set_defaults(func=cmd_fmea)
+
+    p_f = fmea_sub.add_parser("decide", help="approve or reject a draft (requires a human)")
+    p_f.add_argument("db")
+    p_f.add_argument("candidate_id")
+    fmea_decision = p_f.add_mutually_exclusive_group(required=True)
+    fmea_decision.add_argument("--approve", action="store_true")
+    fmea_decision.add_argument("--reject", dest="approve", action="store_false")
+    p_f.add_argument("--reviewer", default=None)
+    p_f.add_argument("--note", default=None)
+    p_f.set_defaults(func=cmd_fmea)
+
+    p_f = fmea_sub.add_parser("apply", help="promote an approved draft (requires a human)")
+    p_f.add_argument("db")
+    p_f.add_argument("candidate_id")
+    p_f.add_argument("--reviewer", default=None)
+    p_f.set_defaults(func=cmd_fmea)
+
+    p_f = fmea_sub.add_parser("trace", help="traceability: rows by event, by component, or gaps")
+    p_f.add_argument("db")
+    p_f.add_argument("--model", required=True)
+    trace_mode = p_f.add_mutually_exclusive_group(required=True)
+    trace_mode.add_argument("--event", default=None, help="rows that cite this basic event")
+    trace_mode.add_argument("--component", default=None, help="rows for this component")
+    trace_mode.add_argument("--dangling", action="store_true",
+                            help="links whose event no longer exists in the current baseline")
+    p_f.set_defaults(func=cmd_fmea)
 
     return parser
 

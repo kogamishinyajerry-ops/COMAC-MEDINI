@@ -126,7 +126,7 @@ Q = qᵢ·q+ᵢ + (1 − qᵢ)·q−ᵢ          （多重线性恒等式，无�
 
 单文件 SQLite（`--db <path>`）。关系表足以表达初期本体，不引入图数据库；团队版迁移 PostgreSQL 时用 `store export` 做往返（B_核心规划 §88）。
 
-### 五张表的含义
+### 八张表的含义
 
 | 表 | 一行代表 | 关键约束 |
 | --- | --- | --- |
@@ -134,7 +134,10 @@ Q = qᵢ·q+ᵢ + (1 − qᵢ)·q−ᵢ          （多重线性恒等式，无�
 | `baselines` | 一份**不可变**的语义快照，主键是语义哈希 | 一旦插入，任何字段都不再改写 |
 | `runs` | 一次分析结果（含完整结果 JSON） | `run_id` 不可变；`content_fingerprint` 判等 |
 | `importance` | 一次 run 中一个事件的度量 | 主键 `(run_id, event_id)`，全为精确文本 |
-| `reviews` | 一次变更提案及其决定 | 状态机见下 |
+| `reviews` | 一次模型基线变更提案及其决定 | 状态机见下 |
+| `fmea_rows` | 一条**已批准**的 FMEA 行（正式表） | 主键 `(model_id, fmea_id, version)`；内容字段插入后永不改写 |
+| `fmea_links` | 正式行 ↔ 基本事件的关联 | 主键 `(model_id, fmea_id, version, event_id)`，多对多 |
+| `fmea_candidates` | 一条待确认的 FMEA 草稿 | 状态机与 `reviews` 同构；只有具名人类能批准 |
 
 ### 精确存储（§231：显示舍入不得改变存储结果）
 
@@ -188,6 +191,62 @@ review apply                                  （需要具名人类；把已批�
 
 **存储层不授予任何批准权**：无论评审走到哪一步，结果信封的 `approval_state` 恒为 `not_granted_by_this_result`。`reviews` 表记录的是工程变更的决定，不是安全结论的批准。
 
+## FMEA 基础表与追溯语义
+
+### 范围边界
+
+本版本实现的是 **FMEA 基础表**，不是 FMECA。一条行包含：组件 / 功能 / 失效模式 / 失效原因 / 局部影响 / 上层影响 / 控制措施 / 证据 / 要求引用，以及与基本事件的关联。
+
+**刻意不含** `severity` / `occurrence` / `detection` / `RPN`：这些是 FMECA 扩展，各自需要独立语义规格与验证项，本版本既不计算也不接受。
+
+### 身份（§100：不得用名称当 ID）
+
+`fmea_id`、`component_id`、`function_id`、`requirement_ids`、`evidence_id` 全部是**稳定标识符**（词法 `^[A-Za-z][A-Za-z0-9_.:-]{0,127}$`），不是显示名。组件/功能/要求在本版本仅以稳定 ID 承载于行上，尚无独立对象表。
+
+### 关联语义（§102：多对多，不强迫一对一）
+
+- 一条行可关联 **0..n** 个基本事件；一个基本事件可被 **0..n** 条行关联。
+- 关联存在 `fmea_links` 关联表中，可用 `fmea trace --event` / `--component` 双向查询。
+- 关联**必须**能对该模型的**当前基线**解析：`fmea propose` 时逐一核对，未知事件 → 记为 `invalid`（`FMEA_LINK`）。
+- 基线之后发生变更、导致某个关联不再可解析时：**不自动修复、不自动删除**。该行完整保留（FMEA 文本是人工知识），缺口通过 `fmea trace --dangling` 与 `store status.dangling_fmea_links` 如实上报。这是**可追溯性缺口**，不是库损坏，因此**不进入** `store verify` 的失败项。
+
+### 来源与确认（§110、§181、§198）
+
+```json
+{ "source": "human" | "inference" | "import", "certainty": "…", "inference_note": "…" }
+```
+
+- `source = "inference"` 的行**必须**填写 `inference_note`，说明**尚待确认什么**；缺失即 `FMEA_SOURCE` 拒收。Agent 可以提出新失效模式，但推断必须被标记，且不得把自己的置信度当作验收结论。
+- 草稿**不会**自行进入正式表。唯一路径：
+
+```
+fmea propose   --expected-baseline-hash H [--expected-version V]   （记录草稿；校验关联与结构）
+fmea decide    --approve | --reject --reviewer NAME               （需要具名人类）
+fmea apply     --reviewer NAME                                    （需要具名人类；晋升为正式行）
+```
+
+- 状态机与 `reviews` **同构**（同一套状态词表与同一道人类审批闸门）：`proposed` →（`approved` | `rejected`）；仅 `approved` 可 → `applied`；校验不通过的草稿记为 `invalid`（保留审计痕迹，不可批准）。
+- `decide` / `apply` 复用与模型变更完全相同的身份闸门：`agent`、`assistant`、`ai`、`bot`、`claude`、`copilot`、`local-cli`、`unknown`、空值 → `APPROVAL_AUTHORITY` 拒绝。
+- 晋升后**原始 `source` 与 `inference_note` 一律保留**，另记 `approved_by` / `approved_utc`。"这条是机器提出的"这一事实永不被洗掉。
+
+### 修订语义（§198：不覆盖已批准事实）
+
+- 正式行的**内容字段插入后永不改写**。修订是**新版本**：`version + 1`，旧版本置 `superseded = 1` 并记 `superseded_by_version`，**完整保留可读**（与 run 的 `stale` 同构）。
+- 修订必须**显式声明目标版本** `--expected-version`：与当前版本不符 → `FMEA_REVISION_CONFLICT` 拒绝（避免悄悄覆盖他人刚改过的内容）；首版行不得声明修订目标。
+- 同一 `fmea_id` 在任一时刻**恰有一个**当前版本（`superseded = 0`），该不变量由验证独立重算。
+
+### 内容哈希（FMEA 规范形式 `fmea-canonical-v1`）
+
+- 覆盖：`model_id`、`fmea_id`、组件/功能、失效模式/原因/两种影响、控制集合、证据集合、要求集合、关联事件集合、`source`。
+- 集合一律**排序后**入哈希：同一组控制/关联以不同顺序录入不产生不同哈希。
+- **不**覆盖 `certainty` 与 `inference_note`——它们是说明字段，改写置信度措辞不是语义变更（与模型 label 同理）。两者作为 `provenance_json` 侧车一并留档。
+- 每次 `apply` 都把草稿的规范形式**重新哈希**并与记录值比对，不一致即 `INTEGRITY` 拒绝。
+
+### 批准绑定
+
+- 批准同时绑定**内容**（规范形式重哈希）与**基线**（`expected_baseline_hash`）：任一被他人移动，`apply` 以 `BASELINE_CONFLICT` 拒绝该过期批准，要求重新决定。
+- 与模型评审一致：**库不授予任何批准权**，`approval_state` 恒为 `not_granted_by_this_result`。FMEA 行的批准是工程内容的确认，不是安全结论的批准。
+
 ## 结构校验规则（实现顺序即拒绝优先级）
 
 1. schema_version 不在 {0.1.0, 0.2.0} → VERSION
@@ -214,8 +273,8 @@ review apply                                  （需要具名人类；把已批�
 | --- | --- |
 | UNSUPPORTED_GATE, RATE_UNSUPPORTED | 3（不支持） |
 | STORE_SCHEMA_MISMATCH（库由不兼容的 schema 世代写入） | 3（不支持） |
-| VERSION, ASSUMPTIONS, ID, DUPLICATE_ID, INPUTS, SOURCE, PROBABILITY, RATE_VALUE, RATE_UNITS, K_OF_N, UNKNOWN_REFERENCE, CYCLE, TOP_EVENT, SIZE_LIMIT, PARSE, IO | 2（非法输入） |
-| RUN_ID_CONFLICT, BASELINE_NOT_CURRENT, BASELINE_CONFLICT, REVIEW_NOT_FOUND, RUN_NOT_FOUND, MODEL_NOT_FOUND, REVIEW_STATE, APPROVAL_AUTHORITY, STORE_BAD_ARGUMENT, STORE_IO | 2（请求被拒） |
+| VERSION, ASSUMPTIONS, ID, DUPLICATE_ID, INPUTS, SOURCE, PROBABILITY, RATE_VALUE, RATE_UNITS, K_OF_N, UNKNOWN_REFERENCE, CYCLE, TOP_EVENT, SIZE_LIMIT, PARSE, IO, FMEA_INPUTS, FMEA_ID, FMEA_SOURCE, FMEA_LINK | 2（非法输入） |
+| RUN_ID_CONFLICT, BASELINE_NOT_CURRENT, BASELINE_CONFLICT, REVIEW_NOT_FOUND, RUN_NOT_FOUND, MODEL_NOT_FOUND, REVIEW_STATE, APPROVAL_AUTHORITY, STORE_BAD_ARGUMENT, STORE_IO, FMEA_NOT_FOUND, FMEA_STATE, FMEA_REVISION_CONFLICT | 2（请求被拒） |
 | INTEGRITY（`store verify` 发现库内不一致） | 5 |
 | 节点/路径上限触发 | 4（资源受限，非错误，结果标 resource_limited） |
 | 内部异常 | 5 |
@@ -243,5 +302,7 @@ review apply                                  （需要具名人类；把已批�
 ## 明确排除（当前版本的拒绝边界）
 
 动态门、顺序失效、修复过程、潜伏/检查间隔、未建模相关性/共因、NOT/非相干逻辑、任意概率分布表达式、软件失效随机化、非恒定失效率（Weibull/老化）。以上任何一项出现在输入中都会导致明确拒绝，不会退化为 AND/OR。
+
+FMEA 侧同样明确排除：FMECA 的 severity/occurrence/detection/RPN、FMEDA、诊断覆盖率与失效率分配、组件/功能/要求的独立对象表、结构化 patch 语言。以上均为后续阶段项，本版本不接受、不近似。
 
 > 注：**恒定失效率λ + 任务时间 t → 任务失效概率 q** 的转换已实现并验证（见"失效率转换语义"），是本版本新纳入的语义，不再属于排除项。

@@ -1,0 +1,28 @@
+{
+  "fmea_id": "FMEA-002",
+  "model_id": "M03_repeated_event",
+  "component_id": "COMP-PUMP-01",
+  "function_id": "FUNC-SUPPLY-PRESSURE",
+  "failure_mode": "intermittent loss of drive coupling engagement",
+  "cause": "suspected coupling wear; no inspection record found for this unit",
+  "local_effect": "torque not transmitted; pump stops locally",
+  "system_effect": "loss of supply pressure to the downstream branch",
+  "controls": [],
+  "evidence": [
+    {
+      "evidence_id": "EV-LOG-22",
+      "kind": "reference",
+      "locator": "maintenance log extract, entries 2026-03-11 and 2026-04-02",
+      "note": "two unplanned stops, root cause not established"
+    }
+  ],
+  "requirement_ids": [
+    "REQ-SUPPLY-9"
+  ],
+  "linked_event_ids": [
+    "A"
+  ],
+  "source": "inference",
+  "certainty": "low — pattern read from free-text log entries by an agent",
+  "inference_note": "Proposed from two unplanned-stop log entries. Needs confirmation that the coupling was actually inspected and that the stops share a cause before this row is treated as established."
+}

@@ -14,12 +14,22 @@ Design rules taken from B_核心规划:
          holding an exact decimal or an exact `n/d` rational. There is no
          REAL/FLOAT column in this schema and `audit_no_float_columns()`
          enforces that.
+  - §102 §198 FMEA rows associate with basic events many-to-many and are never
+         forced to be one-to-one; an approved fact is never overwritten in
+         place (a revision is a new version, the old one is superseded). The
+         FMEA tables carry no numeric measure at all, so they are trivially
+         float-free.
+
+Schema history:
+  v1 — models / baselines / runs / importance / reviews (static FTA + change loop)
+  v2 — fmea_rows / fmea_links / fmea_candidates (FMEA base table + traceability)
+       additive: a v1 database upgrades in place and its data is untouched.
 """
 from __future__ import annotations
 
 import sqlite3
 
-STORE_SCHEMA_VERSION = 1
+STORE_SCHEMA_VERSION = 2
 
 # journal_mode stays at the default (DELETE) so the deliverable remains a
 # single .sqlite file with no -wal/-shm sidecars.
@@ -129,7 +139,93 @@ _MIGRATION_1 = (
     "CREATE INDEX idx_reviews_state ON reviews(state)",
 )
 
-MIGRATIONS: dict[int, tuple[str, ...]] = {1: _MIGRATION_1}
+# --------------------------------------------------------------------------
+# v2 — FMEA base table + traceability (B_核心规划 §102, §198)
+#
+# fmea_rows       the OFFICIAL table. Append-only per (model_id, fmea_id,
+#                 version): an approved fact is never rewritten in place, a
+#                 revision inserts version+1 and marks the older row
+#                 `superseded`. There is no UPDATE of content columns, ever.
+# fmea_links      row <-> BasicEvent, many-to-many. Events themselves live
+#                 inside a baseline's canonical JSON, so there is deliberately
+#                 no foreign key here: a link that stops resolving after a
+#                 baseline move is a real finding, reported by verify().
+# fmea_candidates the draft queue. A machine-proposed row stays here until a
+#                 named human approves AND applies it; only then does it reach
+#                 fmea_rows. Same state vocabulary as `reviews`.
+# --------------------------------------------------------------------------
+_MIGRATION_2 = (
+    """
+    CREATE TABLE fmea_rows (
+        model_id              TEXT NOT NULL REFERENCES models(model_id),
+        fmea_id               TEXT NOT NULL,
+        version               INTEGER NOT NULL,
+        component_id          TEXT NOT NULL,
+        function_id           TEXT NOT NULL,
+        failure_mode          TEXT NOT NULL,
+        cause                 TEXT NOT NULL,
+        local_effect          TEXT NOT NULL,
+        system_effect         TEXT NOT NULL,
+        controls_json         TEXT NOT NULL,
+        evidence_json         TEXT NOT NULL,
+        requirement_ids_json  TEXT NOT NULL,
+        source                TEXT NOT NULL,
+        certainty             TEXT NOT NULL DEFAULT '',
+        inference_note        TEXT NOT NULL DEFAULT '',
+        content_hash          TEXT NOT NULL,
+        canonical_json        TEXT NOT NULL,
+        validated_baseline_hash TEXT NOT NULL,
+        superseded            INTEGER NOT NULL DEFAULT 0,
+        superseded_by_version INTEGER,
+        approved_by           TEXT NOT NULL,
+        approved_utc          TEXT NOT NULL,
+        created_utc           TEXT NOT NULL,
+        created_by            TEXT NOT NULL,
+        PRIMARY KEY (model_id, fmea_id, version)
+    )
+    """,
+    """
+    CREATE TABLE fmea_links (
+        model_id TEXT NOT NULL,
+        fmea_id  TEXT NOT NULL,
+        version  INTEGER NOT NULL,
+        event_id TEXT NOT NULL,
+        PRIMARY KEY (model_id, fmea_id, version, event_id),
+        FOREIGN KEY (model_id, fmea_id, version)
+            REFERENCES fmea_rows(model_id, fmea_id, version) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE fmea_candidates (
+        candidate_id            TEXT PRIMARY KEY,
+        model_id                TEXT NOT NULL,
+        fmea_id                 TEXT NOT NULL,
+        expected_version        INTEGER,
+        expected_baseline_hash  TEXT NOT NULL,
+        observed_baseline_hash  TEXT NOT NULL,
+        proposed_content_hash   TEXT,
+        proposed_canonical_json TEXT,
+        proposed_provenance_json TEXT,
+        state                   TEXT NOT NULL,
+        validation_code         TEXT,
+        validation_message      TEXT,
+        note                    TEXT,
+        proposed_by             TEXT NOT NULL,
+        created_utc             TEXT NOT NULL,
+        decided_by              TEXT,
+        decided_utc             TEXT,
+        applied_version         INTEGER
+    )
+    """,
+    "CREATE INDEX idx_fmea_rows_model ON fmea_rows(model_id)",
+    "CREATE INDEX idx_fmea_rows_current ON fmea_rows(model_id, fmea_id, superseded)",
+    "CREATE INDEX idx_fmea_links_event ON fmea_links(model_id, event_id)",
+    "CREATE INDEX idx_fmea_candidates_state ON fmea_candidates(state)",
+    "CREATE INDEX idx_fmea_candidates_model ON fmea_candidates(model_id)",
+)
+
+MIGRATIONS: dict[int, tuple[str, ...]] = {1: _MIGRATION_1, 2: _MIGRATION_2}
+
 
 
 def connect(path: str) -> sqlite3.Connection:

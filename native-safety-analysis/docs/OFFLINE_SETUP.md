@@ -25,7 +25,7 @@ python run.py capabilities
 
 ## 本地库（基线 / 运行记录 / 评审）
 
-单文件 SQLite，无服务、无端口。首次使用会自动建表（含迁移）。
+单文件 SQLite（schema v2：运行/基线/评审 + FMEA 行/关联/候选共八表），无服务、无端口。首次使用会自动建表（含迁移；v1 库自动**增量**升级到 v2，幂等可重跑）。
 
 ```bash
 # 求解并记录（run_id 幂等：同内容重跑为空操作，不同内容拒绝覆盖）
@@ -50,6 +50,32 @@ python run.py store adopt-baseline store.sqlite <new_model.json> \
        --expected-baseline-hash <current> --reviewer <human>
 ```
 
+## FMEA 基础表与追溯
+
+FMEA 行与基本事件**多对多**关联；机器推断的行必须写 `inference_note`，且**人工批准后**才入正式表。已批准内容不可就地改写——修订产生**新版本**。
+
+```bash
+# 提案（agent 可提案；推断行必须写清待确认事项）
+python run.py fmea propose store.sqlite <fmea_row.json> --review-id FREV-1 \
+       --model <model_id> --source inference --inference-note "待确认：密封件材料 B 的高温退化率" \
+       --expected-version 0 --reviewer agent
+
+# 具名人类批准 → 应用（应用后旧版本自动 superseded，且不会被就地改写）
+python run.py fmea decide store.sqlite FREV-1 --approve --reviewer <human>
+python run.py fmea apply  store.sqlite FREV-1 --reviewer <human>
+
+python run.py fmea rows      store.sqlite --model <model_id> [--all]   # 当前版本（--all 含被取代）
+python run.py fmea candidates store.sqlite [--state proposed]
+python run.py fmea show      store.sqlite <fmea_id> [--version N]
+python run.py fmea trace     store.sqlite --event <event_id>       # 引用该事件的全部行
+python run.py fmea trace     store.sqlite --component <component_id>
+python run.py fmea trace     store.sqlite --dangling               # 基线移动后失联的关联（只报告）
+```
+
+> 注意：`--source inference` 省略 `--inference-note` 会被拒（`FMEA_SOURCE`，退出码 2）。悬空关联是**追溯缺口**，`store verify` 不将其判为损坏。
+
+样例：`examples/F01_fmea_seal_leak.json`（人工行）、`examples/F02_fmea_inference_mode.json`（推断行）。
+
 ## 退出码
 
 | 码 | 含义 |
@@ -69,13 +95,14 @@ python run.py store adopt-baseline store.sqlite <new_model.json> \
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install pytest    # 联网准备环境执行
-.venv/Scripts/python -m pytest tests/ -q      # 141 项，离线可跑
+.venv/Scripts/python -m pytest tests/ -q      # 208 项，离线可跑
 
 # 交叉验证不需要 pytest（纯标准库）：
 python verification/run_cross_check.py              # 210 模型（结构），离线可跑
 python verification/run_rate_cross_check.py         # 120 模型（λt→q 转换），离线可跑
 python verification/run_importance_cross_check.py   # 120 模型（重要度），离线可跑
 python verification/run_store_verification.py       # 存储（重推导 + 突变测试 + 往返），离线可跑
+python verification/run_fmea_verification.py        # FMEA（原始列独立重哈希 + 状态机 + 突变测试），离线可跑
 ```
 
 内网离线迁移：将整个 `native-safety-analysis/` 目录拷入。pytest 可在准备环境 `pip download pytest -d wheels/` 后以 `pip install --no-index --find-links wheels/ pytest` 离线安装；生产与交叉验证链路完全不需要这一步。

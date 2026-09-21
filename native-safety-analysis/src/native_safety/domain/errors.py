@@ -41,3 +41,9 @@ SIZE_LIMIT = "SIZE_LIMIT"
 RATE_VALUE = "RATE_VALUE"
 RATE_UNITS = "RATE_UNITS"
 RATE_UNSUPPORTED = "RATE_UNSUPPORTED"
+# FMEA base table + traceability. Distinct codes so a rejected FMEA row is
+# never mistaken for a rejected fault tree.
+FMEA_INPUTS = "FMEA_INPUTS"        # malformed row structure or empty required text
+FMEA_ID = "FMEA_ID"                # bad stable identifier (row/component/function/requirement)
+FMEA_SOURCE = "FMEA_SOURCE"        # unknown provenance, or an inference row without its note
+FMEA_LINK = "FMEA_LINK"            # a linked event id is unknown / not in the referenced baseline
