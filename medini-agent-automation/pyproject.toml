@@ -1,0 +1,23 @@
+[project]
+name = "medini-automation"
+version = "0.1.0"
+description = "A线：把既有 Medini 智能体成果工程化为受控、可重复的自动化能力"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+medini-automation = "medini_automation.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "synthetic: 合成数据单测（不依赖 medini 实机）",
+    "real_medini: 真机测试（需许可；无环境必须 skip 并说明）",
+]

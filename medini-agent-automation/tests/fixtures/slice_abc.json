@@ -1,0 +1,16 @@
+{
+  "schema": "static-fta",
+  "version": "0.1.0",
+  "name": "slice_abc",
+  "top_gate_id": "TOP",
+  "events": [
+    {"id": "A", "probability": "1/10", "description": "基本事件A", "source": "合成数据（开工提示词指定）", "condition": "固定概率"},
+    {"id": "B", "probability": "1/5", "description": "基本事件B", "source": "合成数据（开工提示词指定）", "condition": "固定概率"},
+    {"id": "C", "probability": "3/10", "description": "基本事件C", "source": "合成数据（开工提示词指定）", "condition": "固定概率"}
+  ],
+  "gates": [
+    {"id": "G_AB", "type": "AND", "inputs": ["A", "B"], "description": "A AND B"},
+    {"id": "G_AC", "type": "AND", "inputs": ["A", "C"], "description": "A AND C"},
+    {"id": "TOP", "type": "OR", "inputs": ["G_AB", "G_AC"], "description": "T=(A AND B) OR (A AND C)"}
+  ]
+}
