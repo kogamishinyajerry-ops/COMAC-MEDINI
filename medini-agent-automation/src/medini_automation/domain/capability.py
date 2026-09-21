@@ -44,6 +44,8 @@ def initial_capabilities(adapter_version: str) -> list[Capability]:
       但「DSH 会话内真实工具调用」未验证（额度上限）→ MCP 项只标 partial
     - P3 审批门禁升级为**可验证凭证**（自实现 Ed25519 + 权限/范围/有效期/
       一次性 nonce）+ 幂等 + 单写者锁 + 恢复记录 → 新增两项 verified
+    - 23:36–23:52 额度重置后补验：DSH 会话内四段真实调用全通（headless
+      profile）→ mcp_dsh_bridge 从 partial 升 verified（12 项全部实测定级）
     """
     return [
         Capability(
@@ -177,17 +179,23 @@ def initial_capabilities(adapter_version: str) -> list[Capability]:
         ),
         Capability(
             capability_id="medini.mcp_dsh_bridge",
-            status="partial",
-            software_version="dsh-mcp-client / fastmcp",
+            status="verified",
+            software_version="dsh-0.1.5-rc.2 / dsh-mcp-client / fastmcp",
             adapter_version=adapter_version,
             method=(
-                "已证部分：MCP stdio server 严格握手冒烟（9 工具精确相等、tools/call "
-                "ok=true、stderr 空、不相关 cwd 下同样通过）；DSH 两 profile patch 写入后 "
-                "`dsh --dump-config` 显示 medini-auto 被正确合成进插件树（web 18 / tui 17 "
-                "个 mcp-client 实例，无 warn-and-skip）"),
+                "DSH 会话内真实调用实测（2026-09-21 23:36–23:52，额度重置后）："
+                "headless profile 四段链 —— medini_get_capabilities（12 项能力、"
+                "双工程白名单 AUTO-WC 可写 / SRC-F2244-C01 只读、许可 open）→ "
+                "medini_read_project（v4 基线 4c2df5de…、漂移 1 项、映射损失 6 条）"
+                "→ medini_reopen_check(publish=true)（实机四重校核全 true、"
+                "registration updated）→ medini_run_analysis（Q_top 0.11 vs 参考 "
+                "11/100，job 645c0482b014）。另有 server 严格 stdio 冒烟（9 工具"
+                "精确相等、stderr 空、不相关 cwd）与 --dump-config 合成验证"
+                "（web/tui/headless 三 profile，无 warn-and-skip）"),
             restrictions=(
-                "**未证**：DSH 会话内发起的真实工具调用（撞智谱 Coding Plan 5 小时额度"
-                "上限，待重置后复验）。因此只标 partial，不标 verified"),
+                "实测通道为 headless profile 的单次会话调用；web/tui 交互界面的"
+                "热载路径未单独实测（同一插件行，机制相同）。工具调用首次可能"
+                "达 140s（medini 冷启动），toolCallTimeoutMs 已设 600s"),
             evidence_id="EV-MCP-DSH-20260921",
         ),
         Capability(

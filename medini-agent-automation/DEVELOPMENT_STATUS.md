@@ -92,7 +92,7 @@
 
 | 项 | 状态 |
 |---|---|
-| **DSH 会话内发起真实工具调用** | **BLOCKED:智谱 Coding Plan 5 小时额度上限**（`RATE_LIMIT 429 / code 1308`，22:25 重置）。已验证：配置被 DSH 正确合成（`--dump-config`）+ server 通过严格 stdio 冒烟 + 子进程 `stdin=DEVNULL` 已就位。待用户在重置后于新 DSH 会话复验（调用链见 `integrations/dsh/README.md`） |
+| ~~DSH 会话内发起真实工具调用~~ | **已闭合（2026-09-21 23:36–23:52）**：headless profile 真实会话四段链全通 —— capabilities（12 项、双工程白名单）→ read_project（v4、漂移 1、映射损失 6）→ reopen_check(publish)（四重校核全 true、registration updated）→ run_analysis（Q=0.11 vs 11/100，job `645c0482b014`）。`mcp_dsh_bridge` 升 verified。顺带修掉 headless 裸 `[]` patch 的安装缺陷（见 API_EVIDENCE） |
 | ~~验收门①：连续 10 次无静默错误~~ | **已关闭（2026-09-21 22:25–22:35）**：3 快照 × 10 连跑全绿，见上表 |
 | 验收门②：10 个 Gold Case（7 开发 + 3 封存） | 待做（现有 3 个合成切片 + 2 个既有工程树；Gold Case 需用户/安全专家提供经批准的脱敏材料） |
 | 验收门③：提效 ≥30% 基线测量 | 待做（需与同一批准任务的人工流程对比计时，非纯代码工作） |

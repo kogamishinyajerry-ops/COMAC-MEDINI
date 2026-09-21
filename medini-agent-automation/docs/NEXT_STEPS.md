@@ -63,11 +63,11 @@
 - 修掉两个真实隐患：`run_headless` 子进程继承 stdin、FastMCP 往 stderr 打日志
 - 证据：`docs/API_EVIDENCE.md` § EV-AGENT-API-20260921 / EV-MCP-DSH-20260921
 
-**待用户复验（唯一未闭合项）**：DSH 会话内发起一次真实工具调用
-（`capabilities → reopen-check → run` 链）。已验证的是「配置被 DSH 正确合成」
-（`--dump-config`）与「server 本身通过严格 stdio 冒烟」，但**会话内真实调用**撞上
-智谱 Coding Plan 5 小时额度上限（`RATE_LIMIT 429 / code 1308`，22:25 重置）。
-调用链已写入 `integrations/dsh/README.md`「推荐调用链」，可直接照做。
+**已闭合（2026-09-21 23:36–23:52）**：额度重置后在 headless profile 的真实 DSH 会话里
+跑通四段链 `capabilities → read_project → reopen_check(publish) → run_analysis`，
+实机结果全部符合预期（详见 API_EVIDENCE § EV-MCP-DSH-20260921「DSH 会话内真实调用
+实测」）。`medini.mcp_dsh_bridge` 升 verified —— **能力矩阵 12 项至此全部实测定级**
+（10 verified / 2 unverified-by-design）。顺带修掉 headless 裸 `[]` patch 的安装缺陷。
 
 ## ✅ P3 — 变更协调器实装（A03 工作包，已完成 2026-09-21）
 

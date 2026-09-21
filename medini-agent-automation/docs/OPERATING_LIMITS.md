@@ -67,8 +67,9 @@
   `ApprovalRef`」这个约束，真身份层不在本仓职责内（P3 才接）
 - **`apply_change` 只推进契约基线**，磁盘 `.fta` 要等 `reopen_check` 才落盘 ——
   中间态由 `native_drift` 显式暴露，不静默
-- **`medini.mcp_dsh_bridge` 只标 partial**：「DSH 会话内真实工具调用」未验证
-  （撞 Coding Plan 5 小时额度上限）。已证的是配置被正确合成 + server 通过严格 stdio 冒烟
+- **MCP/DSH 桥（已 verified，2026-09-21 23:36–23:52）**：DSH 会话内四段真实调用
+  实测通过（headless profile）。边界：web/tui 交互界面的热载路径未单独实测
+  （同一插件行、同一机制）；工具调用首次可能 140s（medini 冷启动）
 - **stdio 传输禁止往 stderr 写日志** —— 无人消费的管道写满 64KB 会阻塞协议流；
   server 已设 `log_level="ERROR"`，改动此参数前请先读 `API_EVIDENCE.md`
 - **MCP server 内的子进程必须 `stdin=DEVNULL`** —— 否则继承 JSON-RPC 读管道，

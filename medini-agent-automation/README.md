@@ -94,9 +94,10 @@ powershell -ExecutionPolicy Bypass -File integrations\dsh\install.ps1 -Backup  #
 DSH 事实**（insert 非 override / 多 profile 同步 / `serverName` 唯一）与完整调用链
 见 [`integrations/dsh/README.md`](integrations/dsh/README.md)。
 
-> 当前 `medini.mcp_dsh_bridge` 状态为 **partial**：配置被 DSH 正确合成与 server 的
-> 严格 stdio 冒烟均已验证，但「DSH 会话内发起一次真实工具调用」尚未验证
-> （撞额度上限）。见 `docs/API_EVIDENCE.md` § EV-MCP-DSH-20260921。
+> `medini.mcp_dsh_bridge` 已于 2026-09-21 23:36–23:52 升 **verified**：额度重置后在
+> headless profile 的真实 DSH 会话里跑通四段链（capabilities → read_project →
+> reopen_check(publish) → run_analysis，实机结果全部符合预期）。证据：
+> `docs/API_EVIDENCE.md` § EV-MCP-DSH-20260921「DSH 会话内真实调用实测」。
 
 ## 审批面板（P3）
 

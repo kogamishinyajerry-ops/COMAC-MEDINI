@@ -108,8 +108,23 @@ def has_block(text: str) -> bool:
     return BEGIN in text
 
 
+def _strip_bare_empty_array(text: str) -> str:
+    """「裸空数组」文件归一化：只含注释与单独一行 ``[]`` 时返回仅注释部分。
+
+    headless 等默认空 patch 显式以 ``[]`` 开头；若保留该行再追加 insert 条目，
+    文件会变成两个 YAML 文档片段（第二个 ``- insert:`` 起始处 ParserError）。
+    语义上 ``[]`` 加条目 == 条目本身，故移除该行是等价变换。
+    有任何实际条目（非注释、非 ``[]``）的文件原样返回。
+    """
+    lines = text.split("\n")
+    content = [ln for ln in lines if ln.strip() and not ln.lstrip().startswith("#")]
+    if content == ["[]"]:
+        return "\n".join(ln for ln in lines if ln.lstrip().startswith("#"))
+    return text
+
+
 def strip_block(text: str) -> tuple[str, int]:
-    """移除 BEGIN..END 整块（含哨兵）及其前导空行。返回 (新文本, 移除块数)。"""
+    """移除 BEGIN..END 整块（含哨兵）及其前导空行。返回 (新文本, 移除块数）。"""
     lines = text.split("\n")
     out: list[str] = []
     i = removed = 0
@@ -208,7 +223,11 @@ def cmd_install(args: argparse.Namespace) -> int:
             dst = p.with_name(p.name + ".bak-" + time.strftime("%Y%m%d-%H%M%S"))
             shutil.copy2(p, dst)
             print(f"BACKUP {dst}")
-        write_text(p, text.rstrip("\n") + "\n\n" + block)
+        # 「裸 [] 文件」归一化：headless 等空 patch 显式以 [] 开头，
+        # 若原样保留再追加条目会得到两个 YAML 文档片段（ParserError）。
+        # 把只含注释 + [] 的文件视作空文件重写，语义等价且可再追加。
+        body = _strip_bare_empty_array(text)
+        write_text(p, body.rstrip("\n") + "\n\n" + block)
         print(f"WROTE {p}")
         written += 1
 

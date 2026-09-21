@@ -298,13 +298,45 @@ reopen_check(publish=True) → 四重校核全绿（Q0==Q1==0.11、磁盘 SHA-25
 
 ### 诚实边界（未验证项）
 
-- **「DSH 会话内发起一次真实工具调用」未验证**。实测撞智谱 Coding Plan 5 小时额度上限：
-  `dsh: RATE_LIMIT: 429: {"code":"1308",...限额将在 2026-09-21 22:25:06 重置}`。
-  替代验证走 `--dump-config`（合成 profile 树但不启模型）。因此能力矩阵中
-  `medini.mcp_dsh_bridge` 只标 **partial**
+- ~~「DSH 会话内发起一次真实工具调用」未验证~~ **已于 2026-09-21 23:36–23:52 补验闭合**：
+  额度重置后在 headless profile 的真实会话里跑通四段链
+  （`get_capabilities` → `read_project` → `reopen_check(publish=true)` → `run_analysis`），
+  结果全部符合预期 —— 详见下方「DSH 会话内真实调用实测」。`medini.mcp_dsh_bridge`
+  已升 verified
+- web/tui 交互界面的热载路径未单独实测（与 headless 同一插件行、同一机制）
 - `apply_change` 的审批门禁是**控制面机制**，不是身份基础设施（真身份层不在本仓职责内）
 - `patch_dsh.py` 经 Bash 执行 + 单测验证；`.ps1` 仅为薄壳（本会话 PowerShell 工具无输出，
   故文件手术下沉到 Python 核心，`install.ps1` 缩到可肉眼审）
+
+### DSH 会话内真实调用实测（2026-09-21 23:36–23:52）
+
+前置：智谱额度 22:25 重置后，把 medini-auto 行补装进 **headless** profile
+（`--profiles headless`）—— 单次 CLI 会话走的正是这个 profile，它此前为空数组。
+
+```
+dsh（node bin.js --profile headless "指令"）会话内：
+
+1. medini_get_capabilities      → 12 项能力；AUTO-WC writable=true、
+                                  SRC-F2244-C01 writable=false；license open
+2. medini_read_project          → baseline v4（4c2df5de…）、native_drift 1 项
+                                  （上次 reopen 前的中间态，符合预期）、
+                                  mapping_loss 6 条
+3. medini_reopen_check(publish) → 四重校核全 true、registration=updated
+                                  （实机 medini 进程，双 JVM 阶段）
+4. medini_run_analysis          → verdict=pass、Q_top=0.11 vs 参考 11/100、
+                                  job 645c0482b014（实机计算）
+```
+
+模型侧没有任何特殊处理：指令就是自然语言「调用工具 X，参数 …，把返回字段
+原样报告」—— DSH 的工具调用机制自己完成了 MCP stdio 往返。
+
+### 过程中修掉的一个真实缺陷（headless 裸 `[]` 文件）
+
+`patch_dsh.py` 首次往 headless 安装时产生 **ParserError**：headless 的
+`cordis.patch.yml` 显式以 `[]`（空数组）开头，在它后面追加 `- insert:` 条目
+会让文件变成两个 YAML 文档片段。修法：`_strip_bare_empty_array()` 把
+「只含注释 + `[]`」的文件归一化为仅注释（语义等价：`[]` + 条目 == 条目本身），
+再追加。装回后 `--dump-config` 确认 `serverName: medini-auto` 出现在合成树中。
 
 ## EV-APPROVAL-20260921 — 变更协调器：签名审批 / 幂等 / 单写者（P3，端到端实测）
 
