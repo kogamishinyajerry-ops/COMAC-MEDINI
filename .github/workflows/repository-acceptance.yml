@@ -48,6 +48,9 @@ jobs:
       - name: Import B line entry point
         if: ${{ !cancelled() && matrix.project == 'native-safety-analysis' }}
         run: python -c "import native_safety.cli.main"
+      - name: Run new writer safety regressions explicitly
+        if: ${{ !cancelled() && matrix.project == 'medini-agent-automation' }}
+        run: python -m pytest tests/unit/test_acceptance_writer_lock.py -q
       - name: Run A line non-Medini tests
         if: ${{ !cancelled() && matrix.project == 'medini-agent-automation' }}
         run: python -m pytest tests -q -m 'not real_medini'
