@@ -1,0 +1,174 @@
+{
+  "version": "0.1.0",
+  "classification": "synthetic_mathematical_seeds_not_engineering_gold_cases",
+  "cases": [
+    {
+      "case_id": "M01_and",
+      "file": "examples/M01_and.json",
+      "expected_probability": "0.02",
+      "expected_minimal_cut_sets": [
+        [
+          "A",
+          "B"
+        ]
+      ],
+      "expected_valid": true
+    },
+    {
+      "case_id": "M02_or",
+      "file": "examples/M02_or.json",
+      "expected_probability": "0.28",
+      "expected_minimal_cut_sets": [
+        [
+          "A"
+        ],
+        [
+          "B"
+        ]
+      ],
+      "expected_valid": true
+    },
+    {
+      "case_id": "M03_repeated_event",
+      "file": "examples/M03_repeated_event.json",
+      "expected_probability": "0.044",
+      "expected_minimal_cut_sets": [
+        [
+          "A",
+          "B"
+        ],
+        [
+          "A",
+          "C"
+        ]
+      ],
+      "expected_valid": true
+    },
+    {
+      "case_id": "M04_absorption",
+      "file": "examples/M04_absorption.json",
+      "expected_probability": "0.1",
+      "expected_minimal_cut_sets": [
+        [
+          "A"
+        ]
+      ],
+      "expected_valid": true
+    },
+    {
+      "case_id": "M05_vote_2_of_3",
+      "file": "examples/M05_vote_2_of_3.json",
+      "expected_probability": "0.098",
+      "expected_minimal_cut_sets": [
+        [
+          "A",
+          "B"
+        ],
+        [
+          "A",
+          "C"
+        ],
+        [
+          "B",
+          "C"
+        ]
+      ],
+      "expected_valid": true
+    },
+    {
+      "case_id": "M06_probability_zero_one",
+      "file": "examples/M06_probability_zero_one.json",
+      "expected_probability": "1",
+      "expected_minimal_cut_sets": [
+        [
+          "A"
+        ],
+        [
+          "B"
+        ]
+      ],
+      "expected_valid": true
+    },
+    {
+      "case_id": "M07_shared_subgraph",
+      "file": "examples/M07_shared_subgraph.json",
+      "expected_probability": "0.02",
+      "expected_minimal_cut_sets": [
+        [
+          "A",
+          "B"
+        ]
+      ],
+      "expected_valid": true
+    },
+    {
+      "case_id": "M08_tiny_probability",
+      "file": "examples/M08_tiny_probability.json",
+      "expected_probability": "0.000000000000000000000001",
+      "expected_minimal_cut_sets": [
+        [
+          "A",
+          "B"
+        ]
+      ],
+      "expected_valid": true
+    },
+    {
+      "case_id": "M09_duplicate_reference",
+      "file": "examples/M09_duplicate_reference.json",
+      "expected_probability": "0.02",
+      "expected_minimal_cut_sets": [
+        [
+          "A",
+          "B"
+        ]
+      ],
+      "expected_valid": true
+    },
+    {
+      "case_id": "M10_shared_cause",
+      "file": "examples/M10_shared_cause.json",
+      "expected_probability": "0.314",
+      "expected_minimal_cut_sets": [
+        [
+          "C"
+        ],
+        [
+          "A",
+          "B"
+        ]
+      ],
+      "expected_valid": true
+    },
+    {
+      "case_id": "N01_unknown_reference",
+      "file": "examples/N01_unknown_reference.json",
+      "expected_valid": false,
+      "expected_error": "UNKNOWN_REFERENCE"
+    },
+    {
+      "case_id": "N02_cycle",
+      "file": "examples/N02_cycle.json",
+      "expected_valid": false,
+      "expected_error": "CYCLE"
+    },
+    {
+      "case_id": "N03_out_of_range",
+      "file": "examples/N03_out_of_range.json",
+      "expected_valid": false,
+      "expected_error": "PROBABILITY"
+    },
+    {
+      "case_id": "N04_duplicate_id",
+      "file": "examples/N04_duplicate_id.json",
+      "expected_valid": false,
+      "expected_error": "DUPLICATE_ID"
+    },
+    {
+      "case_id": "N05_unsupported_gate",
+      "file": "examples/N05_unsupported_gate.json",
+      "expected_valid": false,
+      "expected_error": "UNSUPPORTED_GATE"
+    }
+  ]
+}

@@ -1,0 +1,84 @@
+# 资料来源与事实边界
+
+核查日期：2026-09-21。以下仅保留官方厂商、标准组织、监管机构及原项目资料。
+
+本交付是项目规划与开发启动材料，不是已完成的软件、实机测试报告或适航合规结论。所有工期、人数、规模、精度门槛和提效目标均为建议基线，须在第1—2周按实测与专家评审冻结。
+
+## [S01] Ansys medini analyze 产品页
+
+来源：https://ansys.synopsys.com/products/safety-analysis/ansys-medini-analyze
+
+用途与限制：官方产品能力概览；不能代替用户已安装版本的许可清单与接口实测。
+
+## [S02] Ansys medini analyze Datasheet（2023），特别是第3—4页
+
+来源：https://ansys.synopsys.com/content/dam/amp/2023/may/medini-analyze-datasheet-01252023.pdf
+
+用途与限制：官方资料明确列出 JavaScript scripting API，以及故障树、多种概率模型和报告等能力；资料较旧，具体函数、外部调用方式和版本兼容性待本地核实。
+
+## [S03] Ansys medini analyze：航空安全分析方案（2023）
+
+来源：https://ansys.synopsys.com/content/dam/amp/2023/may/ansys-medini-analyze-solutions-functional-safety-aerospace.pdf
+
+用途与限制：官方航空场景与 FHA/PSSA/SSA、FTA/FMEA/CCA、配置管理的关联概览；不等于软件或项目已获得适航批准。
+
+## [S04] Ansys Help：medini analyze 文档入口
+
+来源：https://ansyshelp.ansys.com/public/account/secured?returnurl=%2FViews%2FSecured%2Fprod_page.html%3Fpn%3Dmedini+analyze
+
+用途与限制：检索索引列出 Scripting and API Documentation；公开访问受登录/页面加载限制，本次未获取完整 API 手册。
+
+## [S05] FAA AC 20-115D：Airborne Software Development Assurance
+
+来源：https://www.faa.gov/documentLibrary/media/Advisory_Circular/AC_20-115D.pdf
+
+用途与限制：第1节与第10节说明 DO-178C/DO-330 的相关范围与工具鉴定框架；不能据此把全部地面安全分析工具直接指定为某个 TQL。
+
+## [S06] FAA AC 20-174：Development of Civil Aircraft and Systems
+
+来源：https://www.faa.gov/documentLibrary/media/Advisory_Circular/AC_20-174.pdf
+
+用途与限制：关于 ARP4754A 的官方指导实例；不能把旧指导文件自动当作对新版标准或具体型号的接受声明。
+
+## [S07] SAE：Design Safety / ARP4754B 与 ARP4761A 培训与标准介绍
+
+来源：https://connect.sae.org/design-safety
+
+用途与限制：确认新版体系的存在和范围。具体条文、适用版本、审定基础需使用单位持有的正式标准与项目批准文件。
+
+## [S08] SCRAM 官方代码仓库
+
+来源：https://github.com/rakhimov/scram
+
+用途与限制：静态故障树、事件树、共因模型等候选参考实现；仓库标示 GPL-3.0。当前未进行安装、基准测试或工业验证。
+
+## [S09] Open-PSA Model Exchange Format
+
+来源：https://open-psa.github.io/mef/
+
+用途与限制：故障树/概率风险模型与报告交换的候选格式；必须对齐版本、实际支持子集和语义。
+
+## [S10] OMG ReqIF 1.2
+
+来源：https://www.omg.org/spec/ReqIF/1.2/
+
+用途与限制：需求交换规范。并不提供完整安全模型、故障树或计算结果的无损交换保证。
+
+## [S11] OMG SysML 2.0
+
+来源：https://www.omg.org/spec/SysML/2.0/
+
+用途与限制：系统建模规范和机器可读资源。接口预留不等于实现全部 SysML 语义。
+
+## [S12] OMG Systems Modeling API and Services 1.0
+
+来源：https://www.omg.org/spec/SystemsModelingAPI/1.0/
+
+用途与限制：系统模型 API 的长期互操作参考；首期不把完整实现列为开工依赖。
+
+## [S13] FBK xSAP 官方介绍
+
+来源：https://xsap.fbk.eu/
+
+用途与限制：可研究基于模型检查的安全分析思路；官网限制为非商业或学术用途，企业试用/集成前必须明确授权，不能默认免费商用。
+

@@ -1,0 +1,91 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1.0"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "model_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "engine_version": {
+      "type": "string"
+    },
+    "semantic_model_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "status": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "unsupported",
+        "resource_limited"
+      ]
+    },
+    "top_probability": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(0(\\.[0-9]+)?|1(\\.0+)?)$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "minimal_cut_sets": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+        },
+        "uniqueItems": true
+      }
+    },
+    "cut_sets_complete": {
+      "type": "boolean"
+    },
+    "calculation_mode": {
+      "type": "string"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "approval_state": {
+      "const": "not_granted_by_this_result"
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "model_id",
+    "engine_version",
+    "semantic_model_hash",
+    "status",
+    "top_probability",
+    "minimal_cut_sets",
+    "cut_sets_complete",
+    "calculation_mode",
+    "warnings",
+    "evidence_ids",
+    "approval_state"
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}
