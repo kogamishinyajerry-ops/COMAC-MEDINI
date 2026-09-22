@@ -1,0 +1,145 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1.0"
+    },
+    "model_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "baseline_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "assumptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "basic_events_independent": {
+          "const": true
+        },
+        "probability_semantics": {
+          "const": "fixed_conditioned_probability"
+        },
+        "condition": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "basic_events_independent",
+        "probability_semantics",
+        "condition"
+      ]
+    },
+    "basic_events": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+          },
+          "label": {
+            "type": "string"
+          },
+          "probability": {
+            "type": "string",
+            "pattern": "^(0(\\.[0-9]+)?|1(\\.0+)?)$"
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "probability",
+          "source"
+        ]
+      }
+    },
+    "gates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+          },
+          "kind": {
+            "enum": [
+              "AND",
+              "OR",
+              "K_OF_N"
+            ]
+          },
+          "inputs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+            },
+            "minItems": 1
+          },
+          "k": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "inputs"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "K_OF_N"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "k"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "k"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "top_event": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+    }
+  },
+  "required": [
+    "schema_version",
+    "model_id",
+    "baseline_id",
+    "assumptions",
+    "basic_events",
+    "gates",
+    "top_event"
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Static FTA exchange seed v0.1.0 — fixed probabilities only",
+  "description": "Proposed project contract. Requires additional semantic validation: references, unique IDs, cycles, k bounds, numerical and size limits. Not a full Medini or aviation safety schema."
+}

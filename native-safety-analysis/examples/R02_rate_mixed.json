@@ -1,0 +1,40 @@
+{
+  "schema_version": "0.2.0",
+  "model_id": "R02_rate_mixed",
+  "baseline_id": "SYNTH-RATE",
+  "assumptions": {
+    "basic_events_independent": true,
+    "probability_semantics": "fixed_mission_probability_from_constant_rate",
+    "condition": "Mixed model: one declared fixed probability and one rate-derived mission probability. Synthetic only."
+  },
+  "basic_events": [
+    {
+      "id": "A",
+      "label": "Declared fixed probability event",
+      "probability": "0.1",
+      "source": "synthetic_exact_decimal"
+    },
+    {
+      "id": "B",
+      "label": "Rate-derived event",
+      "source": "synthetic_constant_rate",
+      "failure_rate": {
+        "model": "constant_failure_rate",
+        "lambda": "1e-6",
+        "lambda_unit": "1/h",
+        "mission_time": "1000",
+        "mission_time_unit": "h",
+        "repairable": false,
+        "source": "synthetic_example_only"
+      }
+    }
+  ],
+  "gates": [
+    {
+      "id": "TOP",
+      "kind": "OR",
+      "inputs": ["A", "B"]
+    }
+  ],
+  "top_event": "TOP"
+}

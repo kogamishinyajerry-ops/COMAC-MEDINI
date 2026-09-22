@@ -1,0 +1,38 @@
+{
+  "fmea_id": "FMEA-001",
+  "model_id": "M03_repeated_event",
+  "component_id": "COMP-PUMP-01",
+  "function_id": "FUNC-SUPPLY-PRESSURE",
+  "failure_mode": "seal leak at the drive end",
+  "cause": "O-ring degradation below the specified elastomer class",
+  "local_effect": "fluid loss at the seal face; local pressure decay",
+  "system_effect": "loss of supply pressure to the downstream branch",
+  "controls": [
+    "elastomer class verified against the material specification at receiving inspection",
+    "assembly leak test recorded in the build record"
+  ],
+  "evidence": [
+    {
+      "evidence_id": "EV-TR-114",
+      "kind": "test",
+      "locator": "TR-114 section 4.2, assembly leak test",
+      "note": "acceptance threshold recorded per unit"
+    },
+    {
+      "evidence_id": "EV-SPEC-77",
+      "kind": "document",
+      "locator": "SPEC-77 rev C, table 3 (elastomer compatibility)",
+      "note": ""
+    }
+  ],
+  "requirement_ids": [
+    "REQ-SUPPLY-9"
+  ],
+  "linked_event_ids": [
+    "A",
+    "B"
+  ],
+  "source": "human",
+  "certainty": "confirmed against the build record for the pilot unit",
+  "inference_note": ""
+}

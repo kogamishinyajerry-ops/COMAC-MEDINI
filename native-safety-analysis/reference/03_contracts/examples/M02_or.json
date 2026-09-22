@@ -1,0 +1,35 @@
+{
+  "schema_version": "0.1.0",
+  "model_id": "M02_or",
+  "baseline_id": "SYNTHETIC_01",
+  "assumptions": {
+    "basic_events_independent": true,
+    "probability_semantics": "fixed_conditioned_probability",
+    "condition": "Synthetic mathematical example only; not an aircraft system assessment."
+  },
+  "basic_events": [
+    {
+      "id": "A",
+      "label": "A",
+      "probability": "0.1",
+      "source": "synthetic_exact_decimal"
+    },
+    {
+      "id": "B",
+      "label": "B",
+      "probability": "0.2",
+      "source": "synthetic_exact_decimal"
+    }
+  ],
+  "gates": [
+    {
+      "id": "TOP",
+      "kind": "OR",
+      "inputs": [
+        "A",
+        "B"
+      ]
+    }
+  ],
+  "top_event": "TOP"
+}
