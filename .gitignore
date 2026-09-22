@@ -29,23 +29,28 @@ htmlcov/
 venv/
 env/
 
-# WorkBuddy personal memory / state (per-subdir .workbuddy is fine; top-level is personal)
+# WorkBuddy personal memory / state
 .workbuddy/memory/
 .workbuddy/skills/
 .workbuddy/cache/
 .workbuddy/sessions/
 
-# Planning package archives (the unzipped copy is tracked under planning/)
+# Planning package archives
 *.zip
-
-# Duplicate copy of planning package (identical to 开工包/.../v1.0/, see SHA256SUMS)
 /Medini_双项目规划与开工包_v1.0/
 /Medini_双项目规划与开工包_v1.0.zip
 
-# Heavy/build artifacts that should never reach GitHub
-runs/
-evidence/
-workcopy/
+# Runtime output paths: anchor them so src/*/evidence remains source code.
+/runs/
+/evidence/
+/workcopy/
+/medini-agent-automation/runs/
+/medini-agent-automation/evidence/
+/medini-agent-automation/workcopy/
+/native-safety-analysis/runs/
+/native-safety-analysis/evidence/
+/native-safety-analysis/workcopy/
+
 node_modules/
 build/
 dist/
