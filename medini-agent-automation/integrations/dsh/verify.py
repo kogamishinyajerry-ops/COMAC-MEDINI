@@ -31,6 +31,17 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 _REPO = _HERE.parents[1]
 
+# Windows hands stdout/stderr the locale encoding - GBK on a Chinese host,
+# cp1252 on an en-US one - while every reader here (the pytest assertion, a
+# pipe, a redirected log) decodes as UTF-8. Non-ASCII output therefore either
+# turns into mojibake or raises UnicodeEncodeError outright. Pin both streams
+# to UTF-8 so identical bytes come out on every machine.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
 EXPECTED_TOOLS = [
     "medini_get_capabilities", "medini_read_project", "medini_prepare_change",
     "medini_apply_change", "medini_run_analysis", "medini_get_job",
