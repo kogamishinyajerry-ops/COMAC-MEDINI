@@ -37,9 +37,7 @@ EXPECTED_TOOLS = [
     "medini_readback", "medini_export_evidence", "medini_reopen_check",
 ]
 
-PYTHON = os.environ.get(
-    "MEDINI_AUTO_PYTHON",
-    r"C:\Users\Kogami\.workbuddy\binaries\python\envs\default\Scripts\python.exe")
+PYTHON = os.environ.get("MEDINI_AUTO_PYTHON") or sys.executable
 
 #: 模拟 DSH：不设 cwd 为仓库（用主目录），env 只给 DSH 配置里写的那几项
 NEUTRAL_CWD = Path.home()
@@ -148,7 +146,15 @@ def main() -> int:
             except json.JSONDecodeError:
                 print(f"FAIL 工具返回非 JSON: {text[:300]}"); ok = False
             else:
-                if not payload.get("ok"):
+                err_obj = payload.get("error") or {}
+                if not payload.get("ok") and err_obj.get("code") == "BLOCKED" \
+                        and err_obj.get("blocked_reason"):
+                    # 无许可环境：能力查询 fail-closed 返回 BLOCKED 是**正确行为**。
+                    # 本冒烟验的是 MCP 协议往返（握手 / 工具表 / 结构化响应），
+                    # 不是 medini 业务成功 —— 后者属 real_medini 实机验收。
+                    print("tools/call OK: 协议往返正常，被环境阻断 "
+                          f"(code=BLOCKED reasons={err_obj['blocked_reason']})")
+                elif not payload.get("ok"):
                     print(f"FAIL 工具返回 ok=false: {payload}"); ok = False
                 else:
                     res = payload["result"]
