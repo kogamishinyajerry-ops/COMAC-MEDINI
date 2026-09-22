@@ -918,8 +918,15 @@ def test_a_human_writes_the_real_row_under_the_same_fmea_id(seeded, capsys):
     )
     assert code == 0 and payload["candidate"]["state"] == "proposed"
 
-    cli(capsys, "fmea", "decide", repo.path, "REAL-1", "--approve", "--reviewer", HUMAN)
-    code, payload = cli(capsys, "fmea", "apply", repo.path, "REAL-1", "--reviewer", HUMAN)
+    # four-eyes（R3）：提案者与决定者必须不同人，即使两者都是合法身份。
+    # 决定/应用由另一位工程师完成，模拟真实评审链。
+    with pytest.raises(StoreError) as excinfo:
+        repo.decide_fmea_candidate("REAL-1", approve=True, reviewer=HUMAN)
+    assert excinfo.value.code == store_err.APPROVAL_AUTHORITY
+
+    OTHER_HUMAN = "K. Reviewer"
+    cli(capsys, "fmea", "decide", repo.path, "REAL-1", "--approve", "--reviewer", OTHER_HUMAN)
+    code, payload = cli(capsys, "fmea", "apply", repo.path, "REAL-1", "--reviewer", OTHER_HUMAN)
     assert code == 0 and payload["row"]["failure_mode"] == "seal leak"
     assert repo.current_fmea_version("M03_repeated_event", "FMEA-ATTN-A") == 1
     # the machine draft is still a draft; it never got promoted by accident

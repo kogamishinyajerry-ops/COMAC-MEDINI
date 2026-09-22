@@ -7,6 +7,7 @@ today; an HTTP API or UI later). See `store/schema.py` for the data rules and
 `store/repository.py` for the concurrency, staleness and FMEA-approval rules.
 """
 from .errors import StoreError
+from .approver_registry import is_registered, load_registry, make_registry_entry
 from .repository import (
     FMEA_CANDIDATE_STATES,
     IMPORTANCE_SORT_KEYS,
@@ -24,4 +25,7 @@ __all__ = [
     "STORE_SCHEMA_VERSION",
     "SqliteRepository",
     "StoreError",
+    "is_registered",
+    "load_registry",
+    "make_registry_entry",
 ]

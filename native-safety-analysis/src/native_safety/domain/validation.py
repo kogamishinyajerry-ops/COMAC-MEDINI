@@ -31,7 +31,16 @@ MAX_GATES = 100_000
 
 
 def validate_model(data: dict) -> StaticFtaModel:
-    """Parse raw dict into a validated StaticFtaModel or raise ModelError."""
+    """Parse raw dict into a validated StaticFtaModel or raise ModelError.
+
+    Structural garbage must surface as ModelError, never as AttributeError /
+    KeyError / TypeError leaking through the API boundary (R5).
+    """
+    if not isinstance(data, dict):
+        raise ModelError(
+            errors.INPUTS,
+            f"model must be a JSON object, got {type(data).__name__}",
+        )
     schema_version = data.get("schema_version")
     if schema_version not in MODEL_SCHEMA_VERSIONS:
         raise ModelError(
@@ -81,6 +90,11 @@ def validate_model(data: dict) -> StaticFtaModel:
     rates: dict[str, dict] = {}
     any_rate = False
     for raw in raw_events:
+        if not isinstance(raw, dict):
+            raise ModelError(
+                errors.INPUTS,
+                f"basic_events entries must be objects, got {type(raw).__name__}",
+            )
         eid = raw.get("id")
         if not isinstance(eid, str) or not ID_PATTERN.fullmatch(eid):
             raise ModelError(errors.ID, f"invalid basic event id {eid!r}")
@@ -112,6 +126,11 @@ def validate_model(data: dict) -> StaticFtaModel:
             any_rate = True
             rates[eid] = rate_provenance(spec, fraction, precision)
         else:
+            if "probability" not in raw:
+                raise ModelError(
+                    errors.PROBABILITY,
+                    f"event {eid}: probability is required in schema 0.1.0",
+                )
             if not isinstance(raw["probability"], str) or not PROBABILITY_PATTERN.fullmatch(raw["probability"]):
                 raise ModelError(errors.PROBABILITY, f"invalid probability for {eid}: {raw.get('probability')!r}")
             fraction = Fraction(raw["probability"])
@@ -149,13 +168,18 @@ def validate_model(data: dict) -> StaticFtaModel:
     gates: list[Gate] = []
     gate_by_id: dict[str, Gate] = {}
     for raw in raw_gates:
+        if not isinstance(raw, dict):
+            raise ModelError(
+                errors.INPUTS,
+                f"gates entries must be objects, got {type(raw).__name__}",
+            )
         gid = raw.get("id")
         if not isinstance(gid, str) or not ID_PATTERN.fullmatch(gid):
             raise ModelError(errors.ID, f"invalid gate id {gid!r}")
         if gid in gate_by_id or gid in probabilities:
             raise ModelError(errors.DUPLICATE_ID, f"duplicate gate id {gid}")
         kind = raw.get("kind")
-        if kind not in GATE_KINDS:
+        if not isinstance(kind, str) or kind not in GATE_KINDS:
             raise ModelError(errors.UNSUPPORTED_GATE, f"gate {gid} has unsupported kind {kind!r}")
         inputs = raw.get("inputs")
         if not isinstance(inputs, list) or not inputs or not all(isinstance(x, str) for x in inputs):

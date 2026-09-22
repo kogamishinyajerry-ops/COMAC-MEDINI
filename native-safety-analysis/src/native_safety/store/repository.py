@@ -63,6 +63,7 @@ from ..domain.semantic_hash import (
 )
 from . import errors
 from .errors import StoreError
+from .approver_registry import is_registered
 from .schema import (
     STORE_SCHEMA_VERSION,
     apply_migrations,
@@ -130,13 +131,44 @@ def _rendering_kind(value: Fraction) -> str:
     return "exact_decimal" if exact_decimal(value) is not None else "exact_rational"
 
 
-def _assert_approver(actor: str | None, what: str) -> str:
+def _assert_approver(
+    actor: str | None,
+    what: str,
+    *,
+    registry: dict | None = None,
+    proposed_by: str | None = None,
+) -> str:
+    """Gate an approval action behind an out-of-band identity boundary.
+
+    Failure order is deliberate and each refusal names its code:
+
+      1. empty / blacklisted name            -> APPROVAL_AUTHORITY (fail closed)
+      2. registry given but name absent      -> APPROVAL_AUTHORITY (not registered)
+      3. proposer == approver                -> APPROVAL_AUTHORITY (four-eyes)
+
+    When ``registry`` is None the caller explicitly runs in the legacy
+    trusted-operator mode; the store then still enforces the blacklist and
+    four-eyes, and the operator owns the claim that the caller is human.
+    """
     name = (actor or "").strip()
     if name.lower() in NON_APPROVING_IDENTITIES:
         raise StoreError(
             errors.APPROVAL_AUTHORITY,
             f"{what} requires an explicit human reviewer; {name or '(none given)'!r} has no "
             "approval authority. An agent may propose a change but never approve or apply it.",
+        )
+    if registry is not None and not is_registered(registry, name):
+        raise StoreError(
+            errors.APPROVAL_AUTHORITY,
+            f"{what}: {name!r} is not in the approver registry. A name string proves "
+            "nothing; approval authority is granted by out-of-band registration, "
+            "not by picking an unlisted name.",
+        )
+    if proposed_by is not None and proposed_by.strip().lower() == name.lower():
+        raise StoreError(
+            errors.APPROVAL_AUTHORITY,
+            f"{what}: {name!r} proposed this change and cannot decide or apply it "
+            "self-approval would defeat the whole review loop.",
         )
     return name
 
@@ -784,12 +816,28 @@ class SqliteRepository:
         sql += " ORDER BY created_utc, review_id"
         return [dict(r) for r in self.conn.execute(sql, params)]
 
-    def decide_review(self, review_id: str, *, approve: bool, reviewer: str, note: str | None = None) -> dict:
-        """Approve or reject a proposal. Requires an explicit human reviewer."""
-        actor = _assert_approver(reviewer, "deciding a review")
+    def decide_review(
+        self,
+        review_id: str,
+        *,
+        approve: bool,
+        reviewer: str,
+        note: str | None = None,
+        approver_registry: dict | None = None,
+    ) -> dict:
+        """Approve or reject a proposal. Requires an explicit human reviewer.
+
+        ``approver_registry`` (optional): parsed registry from
+        ``approver_registry.load_registry``. When given, the reviewer must be
+        registered there and must differ from the proposal's author.
+        """
         record = self.get_review(review_id)
         if record is None:
             raise StoreError(errors.REVIEW_NOT_FOUND, f"no review {review_id!r}")
+        actor = _assert_approver(
+            reviewer, "deciding a review",
+            registry=approver_registry, proposed_by=record.get("proposed_by"),
+        )
         if record["state"] not in ("proposed",):
             raise StoreError(
                 errors.REVIEW_STATE,
@@ -806,12 +854,21 @@ class SqliteRepository:
             )
         return self.get_review(review_id)
 
-    def apply_review(self, review_id: str, *, reviewer: str) -> tuple[dict, tuple[str, ...]]:
-        """Apply an approved proposal: register its baseline, flag old runs stale."""
-        actor = _assert_approver(reviewer, "applying a review")
+    def apply_review(
+        self, review_id: str, *, reviewer: str, approver_registry: dict | None = None,
+    ) -> tuple[dict, tuple[str, ...]]:
+        """Apply an approved proposal: register its baseline, flag old runs stale.
+
+        ``approver_registry`` semantics as in ``decide_review``; the reviewer
+        must also differ from the proposal's author.
+        """
         record = self.get_review(review_id)
         if record is None:
             raise StoreError(errors.REVIEW_NOT_FOUND, f"no review {review_id!r}")
+        actor = _assert_approver(
+            reviewer, "applying a review",
+            registry=approver_registry, proposed_by=record.get("proposed_by"),
+        )
         if record["state"] != "approved":
             raise StoreError(
                 errors.REVIEW_STATE,
@@ -1085,13 +1142,25 @@ class SqliteRepository:
         return [dict(r) for r in self.conn.execute(sql, params)]
 
     def decide_fmea_candidate(
-        self, candidate_id: str, *, approve: bool, reviewer: str, note: str | None = None
+        self,
+        candidate_id: str,
+        *,
+        approve: bool,
+        reviewer: str,
+        note: str | None = None,
+        approver_registry: dict | None = None,
     ) -> dict:
-        """Approve or reject a draft. Requires an explicit named human."""
-        actor = _assert_approver(reviewer, "deciding an FMEA candidate")
+        """Approve or reject a draft. Requires an explicit named human.
+
+        ``approver_registry`` semantics as in ``decide_review``.
+        """
         record = self.get_fmea_candidate(candidate_id)
         if record is None:
             raise StoreError(errors.FMEA_NOT_FOUND, f"no FMEA candidate {candidate_id!r}")
+        actor = _assert_approver(
+            reviewer, "deciding an FMEA candidate",
+            registry=approver_registry, proposed_by=record.get("proposed_by"),
+        )
         if record["state"] != "proposed":
             raise StoreError(
                 errors.FMEA_STATE,
@@ -1111,17 +1180,23 @@ class SqliteRepository:
             )
         return self.get_fmea_candidate(candidate_id)
 
-    def apply_fmea_candidate(self, candidate_id: str, *, reviewer: str) -> tuple[dict, dict]:
+    def apply_fmea_candidate(
+        self, candidate_id: str, *, reviewer: str, approver_registry: dict | None = None,
+    ) -> tuple[dict, dict]:
         """Promote an approved draft into the official table.
 
         Returns (candidate, promoted_row). The approval is bound to BOTH the
         content hash and the baseline it was proposed against: if either moved,
         the apply is refused and the approval must be re-decided.
+        ``approver_registry`` semantics as in ``decide_review``.
         """
-        actor = _assert_approver(reviewer, "applying an FMEA candidate")
         record = self.get_fmea_candidate(candidate_id)
         if record is None:
             raise StoreError(errors.FMEA_NOT_FOUND, f"no FMEA candidate {candidate_id!r}")
+        actor = _assert_approver(
+            reviewer, "applying an FMEA candidate",
+            registry=approver_registry, proposed_by=record.get("proposed_by"),
+        )
         if record["state"] != "approved":
             raise StoreError(
                 errors.FMEA_STATE,
