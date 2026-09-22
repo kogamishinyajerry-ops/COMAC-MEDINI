@@ -280,8 +280,15 @@ def test_mcp_server_stdio_smoke():
     """真起一个 stdio 子进程走完整握手（不需要 medini / 许可）。
 
     这条测试把 ``verify.py`` 纳入套件——否则它只是「手工跑过一次的脚本」，
-    没有回归保护。判据：9 工具、tools/call ok=true、exit=0、stderr 为空。
+    没有回归保护。判据：9 工具、tools/call 返回结构化响应、exit=0、stderr 为空。
+
+    无许可时工具调用 fail-closed 返回 ``BLOCKED``，那仍是**正确的协议往返**；
+    "业务调用成功"属 real_medini 实机验收，不在本冒烟范围。
+
+    ``mcp`` 是集成件的可选依赖（见 pyproject 的 ``dsh`` extra）。未安装时
+    skip 并说明，而不是伪装成通过或报成失败。
     """
+    pytest.importorskip("mcp", reason="MCP server 依赖 mcp 包：pip install '.[dsh]'")
     import subprocess
     verify = REPO / "integrations" / "dsh" / "verify.py"
     r = subprocess.run([sys.executable, str(verify), "--call"],

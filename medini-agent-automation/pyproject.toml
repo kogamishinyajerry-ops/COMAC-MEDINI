@@ -5,6 +5,12 @@ description = "A线：把既有 Medini 智能体成果工程化为受控、可�
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+# DSH / MCP 集成件（integrations/dsh/server.py）的可选依赖。
+# 核心包只用标准库：契约校验、静态 FTA、存储与求解内核都不需要第三方包。
+# 离线环境请用随包提供的 wheelhouse 安装，不要联网 pip。
+dsh = ["mcp>=1.16,<2", "PyYAML>=6.0,<7"]
+
 [project.scripts]
 medini-automation = "medini_automation.cli:main"
 

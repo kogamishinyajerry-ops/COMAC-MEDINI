@@ -1,0 +1,13 @@
+<?xml version="1.1" encoding="UTF-8"?>
+<fta:FTAModel xmi:version="2.0" xmlns:xmi="http://www.omg.org/XMI" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:fta="http://www.ikv.de/medini/metamodels/FTA/2.0" xmi:id="_gvMq4LWtEfGToI-rme3krA" mediniIdentifier="_gvMq4LWtEfGToI-rme3krA">
+  <events xmi:id="_gwo1ULWtEfGToI-rme3krA" mediniIdentifier="_gwo1ULWtEfGToI-rme3krA" name="基本事件A" rawProbability="0.1" id="A" nodes="_gwpcYLWtEfGToI-rme3krA"/>
+  <events xmi:id="_gwr4oLWtEfGToI-rme3krA" mediniIdentifier="_gwr4oLWtEfGToI-rme3krA" name="基本事件B" rawProbability="0.2" id="B" nodes="_gwr4obWtEfGToI-rme3krA"/>
+  <events xmi:id="_gwr4orWtEfGToI-rme3krA" mediniIdentifier="_gwr4orWtEfGToI-rme3krA" name="A OR B（保存重开链路用）" id="TOP" nodes="_gwr4o7WtEfGToI-rme3krA"/>
+  <gates xsi:type="fta:LogicalGate" xmi:id="_gwr4pLWtEfGToI-rme3krA" mediniIdentifier="_gwr4pLWtEfGToI-rme3krA" name="TOP" inputs="_gwtGwLWtEfGToI-rme3krA _gwtGwbWtEfGToI-rme3krA" outputs="_gwr4pbWtEfGToI-rme3krA" kind="OR"/>
+  <connections xmi:id="_gwtGwLWtEfGToI-rme3krA" mediniIdentifier="_gwtGwLWtEfGToI-rme3krA" outputNode="_gwpcYLWtEfGToI-rme3krA" inputNode="_gwr4pLWtEfGToI-rme3krA"/>
+  <connections xmi:id="_gwtGwbWtEfGToI-rme3krA" mediniIdentifier="_gwtGwbWtEfGToI-rme3krA" outputNode="_gwr4obWtEfGToI-rme3krA" inputNode="_gwr4pLWtEfGToI-rme3krA"/>
+  <connections xmi:id="_gwr4pbWtEfGToI-rme3krA" mediniIdentifier="_gwr4pbWtEfGToI-rme3krA" outputNode="_gwr4pLWtEfGToI-rme3krA" inputNode="_gwr4o7WtEfGToI-rme3krA"/>
+  <eventNodes xmi:id="_gwpcYLWtEfGToI-rme3krA" mediniIdentifier="_gwpcYLWtEfGToI-rme3krA" outputs="_gwtGwLWtEfGToI-rme3krA" event="_gwo1ULWtEfGToI-rme3krA"/>
+  <eventNodes xmi:id="_gwr4obWtEfGToI-rme3krA" mediniIdentifier="_gwr4obWtEfGToI-rme3krA" outputs="_gwtGwbWtEfGToI-rme3krA" event="_gwr4oLWtEfGToI-rme3krA"/>
+  <eventNodes xmi:id="_gwr4o7WtEfGToI-rme3krA" mediniIdentifier="_gwr4o7WtEfGToI-rme3krA" inputs="_gwr4pbWtEfGToI-rme3krA" event="_gwr4orWtEfGToI-rme3krA"/>
+</fta:FTAModel>

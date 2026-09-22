@@ -4,12 +4,21 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
-runs/
-jobs/
-logs/
+
+# 运行产物目录：锚定到本项目根，避免任意深度的同名目录被一并忽略
+/runs/
+/jobs/
+/logs/
+# P1 工作副本工程：构建产物，由 scripts/setup-workcopy.py 重建
+/workcopy/
+
+# medini 落盘产物的扩展名特征
 *.medini
 *.mprx
 *.fta
 *.fta_diagram
-# P1 工作副本工程：构建产物，由 scripts/setup-workcopy.py 重建
-workcopy/
+
+# 测试夹具是源码，不是运行产物。上面的产物式规则不得吞掉它们：
+# 历史缺陷 —— 未锚定的 *.fta 曾忽略 tests/fixtures/abc.fta 与 or_save.fta，
+# 使干净检出出现 76 error + 30 failure，而开发者工作区因文件恰好存在于本地而不复现。
+!/tests/fixtures/*.fta

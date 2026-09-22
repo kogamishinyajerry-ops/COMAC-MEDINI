@@ -8,9 +8,8 @@ __pycache__/
 .venv/
 venv/
 
-# Generated run artifacts (evidence bundles are reproducible from the model +
-# engine version; they are not source). Keep the directory itself.
-evidence/
+# Runtime evidence at the project root. Do NOT ignore src/native_safety/evidence.
+/evidence/
 
 # Editor / OS
 .vscode/

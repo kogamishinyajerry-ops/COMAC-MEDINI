@@ -1,0 +1,28 @@
+<?xml version="1.1" encoding="UTF-8"?>
+<fta:FTAModel xmi:version="2.0" xmlns:xmi="http://www.omg.org/XMI" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:fta="http://www.ikv.de/medini/metamodels/FTA/2.0" xmi:id="_eWtJgLWtEfGqefUoQIjM5A" mediniIdentifier="_eWtJgLWtEfGqefUoQIjM5A">
+  <events xmi:id="_eXzVsLWtEfGqefUoQIjM5A" mediniIdentifier="_eXzVsLWtEfGqefUoQIjM5A" name="基本事件A" rawProbability="0.1" id="A" nodes="_eXz8wLWtEfGqefUoQIjM5A _eX3AErWtEfGqefUoQIjM5A"/>
+  <events xmi:id="_eX1x8LWtEfGqefUoQIjM5A" mediniIdentifier="_eX1x8LWtEfGqefUoQIjM5A" name="基本事件B" rawProbability="0.2" id="B" nodes="_eX1x8bWtEfGqefUoQIjM5A"/>
+  <events xmi:id="_eX2ZALWtEfGqefUoQIjM5A" mediniIdentifier="_eX2ZALWtEfGqefUoQIjM5A" name="基本事件C" rawProbability="0.3" id="C" nodes="_eX2ZAbWtEfGqefUoQIjM5A"/>
+  <events xmi:id="_eX2ZArWtEfGqefUoQIjM5A" mediniIdentifier="_eX2ZArWtEfGqefUoQIjM5A" name="A AND B" id="G_AB" nodes="_eX2ZA7WtEfGqefUoQIjM5A"/>
+  <events xmi:id="_eX2ZBrWtEfGqefUoQIjM5A" mediniIdentifier="_eX2ZBrWtEfGqefUoQIjM5A" name="A AND C" id="G_AC" nodes="_eX2ZB7WtEfGqefUoQIjM5A"/>
+  <events xmi:id="_eX2ZCrWtEfGqefUoQIjM5A" mediniIdentifier="_eX2ZCrWtEfGqefUoQIjM5A" name="T=(A AND B) OR (A AND C)" id="TOP" nodes="_eX2ZC7WtEfGqefUoQIjM5A"/>
+  <gates xsi:type="fta:LogicalGate" xmi:id="_eX2ZBLWtEfGqefUoQIjM5A" mediniIdentifier="_eX2ZBLWtEfGqefUoQIjM5A" name="G_AB" inputs="_eX3AELWtEfGqefUoQIjM5A _eX3AEbWtEfGqefUoQIjM5A" outputs="_eX2ZBbWtEfGqefUoQIjM5A"/>
+  <gates xsi:type="fta:LogicalGate" xmi:id="_eX2ZCLWtEfGqefUoQIjM5A" mediniIdentifier="_eX2ZCLWtEfGqefUoQIjM5A" name="G_AC" inputs="_eX3AE7WtEfGqefUoQIjM5A _eX3AFLWtEfGqefUoQIjM5A" outputs="_eX2ZCbWtEfGqefUoQIjM5A"/>
+  <gates xsi:type="fta:LogicalGate" xmi:id="_eX2ZDLWtEfGqefUoQIjM5A" mediniIdentifier="_eX2ZDLWtEfGqefUoQIjM5A" name="TOP" inputs="_eX3AFbWtEfGqefUoQIjM5A _eX3AFrWtEfGqefUoQIjM5A" outputs="_eX2ZDbWtEfGqefUoQIjM5A" kind="OR"/>
+  <connections xmi:id="_eX3AELWtEfGqefUoQIjM5A" mediniIdentifier="_eX3AELWtEfGqefUoQIjM5A" outputNode="_eXz8wLWtEfGqefUoQIjM5A" inputNode="_eX2ZBLWtEfGqefUoQIjM5A"/>
+  <connections xmi:id="_eX3AEbWtEfGqefUoQIjM5A" mediniIdentifier="_eX3AEbWtEfGqefUoQIjM5A" outputNode="_eX1x8bWtEfGqefUoQIjM5A" inputNode="_eX2ZBLWtEfGqefUoQIjM5A"/>
+  <connections xmi:id="_eX3AFLWtEfGqefUoQIjM5A" mediniIdentifier="_eX3AFLWtEfGqefUoQIjM5A" outputNode="_eX2ZAbWtEfGqefUoQIjM5A" inputNode="_eX2ZCLWtEfGqefUoQIjM5A"/>
+  <connections xmi:id="_eX3AFbWtEfGqefUoQIjM5A" mediniIdentifier="_eX3AFbWtEfGqefUoQIjM5A" outputNode="_eX2ZA7WtEfGqefUoQIjM5A" inputNode="_eX2ZDLWtEfGqefUoQIjM5A"/>
+  <connections xmi:id="_eX3AFrWtEfGqefUoQIjM5A" mediniIdentifier="_eX3AFrWtEfGqefUoQIjM5A" outputNode="_eX2ZB7WtEfGqefUoQIjM5A" inputNode="_eX2ZDLWtEfGqefUoQIjM5A"/>
+  <connections xmi:id="_eX3AE7WtEfGqefUoQIjM5A" mediniIdentifier="_eX3AE7WtEfGqefUoQIjM5A" outputNode="_eX3AErWtEfGqefUoQIjM5A" inputNode="_eX2ZCLWtEfGqefUoQIjM5A"/>
+  <connections xmi:id="_eX2ZBbWtEfGqefUoQIjM5A" mediniIdentifier="_eX2ZBbWtEfGqefUoQIjM5A" outputNode="_eX2ZBLWtEfGqefUoQIjM5A" inputNode="_eX2ZA7WtEfGqefUoQIjM5A"/>
+  <connections xmi:id="_eX2ZCbWtEfGqefUoQIjM5A" mediniIdentifier="_eX2ZCbWtEfGqefUoQIjM5A" outputNode="_eX2ZCLWtEfGqefUoQIjM5A" inputNode="_eX2ZB7WtEfGqefUoQIjM5A"/>
+  <connections xmi:id="_eX2ZDbWtEfGqefUoQIjM5A" mediniIdentifier="_eX2ZDbWtEfGqefUoQIjM5A" outputNode="_eX2ZDLWtEfGqefUoQIjM5A" inputNode="_eX2ZC7WtEfGqefUoQIjM5A"/>
+  <eventNodes xmi:id="_eXz8wLWtEfGqefUoQIjM5A" mediniIdentifier="_eXz8wLWtEfGqefUoQIjM5A" outputs="_eX3AELWtEfGqefUoQIjM5A" event="_eXzVsLWtEfGqefUoQIjM5A"/>
+  <eventNodes xmi:id="_eX1x8bWtEfGqefUoQIjM5A" mediniIdentifier="_eX1x8bWtEfGqefUoQIjM5A" outputs="_eX3AEbWtEfGqefUoQIjM5A" event="_eX1x8LWtEfGqefUoQIjM5A"/>
+  <eventNodes xmi:id="_eX2ZAbWtEfGqefUoQIjM5A" mediniIdentifier="_eX2ZAbWtEfGqefUoQIjM5A" outputs="_eX3AFLWtEfGqefUoQIjM5A" event="_eX2ZALWtEfGqefUoQIjM5A"/>
+  <eventNodes xmi:id="_eX2ZA7WtEfGqefUoQIjM5A" mediniIdentifier="_eX2ZA7WtEfGqefUoQIjM5A" inputs="_eX2ZBbWtEfGqefUoQIjM5A" outputs="_eX3AFbWtEfGqefUoQIjM5A" event="_eX2ZArWtEfGqefUoQIjM5A"/>
+  <eventNodes xmi:id="_eX2ZB7WtEfGqefUoQIjM5A" mediniIdentifier="_eX2ZB7WtEfGqefUoQIjM5A" inputs="_eX2ZCbWtEfGqefUoQIjM5A" outputs="_eX3AFrWtEfGqefUoQIjM5A" event="_eX2ZBrWtEfGqefUoQIjM5A"/>
+  <eventNodes xmi:id="_eX2ZC7WtEfGqefUoQIjM5A" mediniIdentifier="_eX2ZC7WtEfGqefUoQIjM5A" inputs="_eX2ZDbWtEfGqefUoQIjM5A" event="_eX2ZCrWtEfGqefUoQIjM5A"/>
+  <eventNodes xmi:id="_eX3AErWtEfGqefUoQIjM5A" mediniIdentifier="_eX3AErWtEfGqefUoQIjM5A" outputs="_eX3AE7WtEfGqefUoQIjM5A" event="_eXzVsLWtEfGqefUoQIjM5A"/>
+</fta:FTAModel>
