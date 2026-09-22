@@ -37,9 +37,10 @@ jobs:
         run: |
           python -m pip install pytest==8.4.2
           if [ "${{ matrix.project }}" = "medini-agent-automation" ]; then
-            # integrations/dsh/server.py 需要 mcp（pyproject 的 dsh extra）。
-            # 不装的话 MCP 冒烟测试会因为 ImportError 失败，看起来像代码坏了。
-            python -m pip install "mcp==1.16.0"
+            # integrations/dsh 需要 mcp 与 PyYAML（pyproject 的 dsh extra）。
+            # 缺 mcp：MCP 冒烟测试 ImportError 失败，看起来像代码坏了。
+            # 缺 PyYAML：patch_dsh 的 yaml 复验静默降级为 skip，不会有任何红灯。
+            python -m pip install "mcp==1.16.0" "PyYAML==6.0.3"
           fi
       - name: Record environment
         run: |
