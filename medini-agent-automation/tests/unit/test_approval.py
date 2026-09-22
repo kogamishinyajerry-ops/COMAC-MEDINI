@@ -389,8 +389,13 @@ class TestWriterLock:
             with writer_lock("WC/or", root=tmp_path, actor="w1"):
                 assert read_lock_holder(tmp_path, "WC/or").held is True
 
-    def test_stale_lock_is_preempted_with_audit(self, tmp_path: Path):
-        """崩溃留下的锁必须能被抢占，否则工程永久写不了 —— 但动作要留痕。"""
+    def test_old_lock_is_refused_not_preempted(self, tmp_path: Path):
+        """锁龄不能证明写者已停止：老旧锁一律拒绝，绝不自动抢占。
+
+        旧契约按 stale_after_s 抢占「看起来太旧」的锁 —— 长作业期间那会
+        放进第二个写者。新契约 fail closed：恢复必须先停写、回读、归档，
+        再由受控管理员解除。本测试固定这条语义，不因绿灯而放宽。
+        """
         import hashlib
         lockdir = tmp_path / "locks"
         with writer_lock("WC/abc", root=tmp_path, actor="w1"):
@@ -404,14 +409,19 @@ class TestWriterLock:
         old = time.time() - 9999
         os.utime(lp, (old, old))
 
-        with writer_lock("WC/abc", root=tmp_path, actor="rescuer",
-                         stale_after_s=600):
-            assert read_lock_holder(tmp_path, "WC/abc").holder["actor"] == "rescuer"
-        assert (lockdir / f"{slug}.stale.jsonl").exists()
-        audit = json.loads(
-            (lockdir / f"{slug}.stale.jsonl").read_text(encoding="utf-8").strip())
-        assert audit["action"] == "preempted"
-        assert audit["stale_holder"]["actor"] == "dead"
+        # 锁龄 9999s，远超任何一个阈值：显式 stale_after_s、极小阈值、
+        # 以及默认值三种情况都必须拒绝，而不是抢占。
+        for kwargs in ({"stale_after_s": 600}, {"stale_after_s": 1}, {}):
+            with pytest.raises(WriterBusy) as ei:
+                with writer_lock("WC/abc", root=tmp_path, actor="rescuer", **kwargs):
+                    pass
+            assert "dead" in str(ei.value)
+
+        # 拒绝之后原始记录必须原样保留：不删除、不改写、不留抢占审计。
+        assert lp.exists(), "拒绝写入时不得删除既有锁记录"
+        assert json.loads(lp.read_text(encoding="utf-8"))["actor"] == "dead"
+        assert read_lock_holder(tmp_path, "WC/abc").holder["actor"] == "dead"
+        assert list(lockdir.glob("*.stale.jsonl")) == [], "不得再产生抢占审计"
 
     def test_lock_wait_times_out(self, tmp_path: Path):
         with writer_lock("WC/abc", root=tmp_path, actor="w1"):
