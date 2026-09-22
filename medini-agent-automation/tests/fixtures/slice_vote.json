@@ -1,0 +1,16 @@
+{
+  "schema": "static-fta",
+  "version": "0.1.0",
+  "name": "slice_vote",
+  "top_gate_id": "TOP",
+  "events": [
+    {"id": "S1", "probability": "1/20", "description": "传感器1失效", "source": "合成数据（稳定性采样第三快照）", "condition": "固定概率"},
+    {"id": "S2", "probability": "3/50", "description": "传感器2失效", "source": "合成数据（稳定性采样第三快照）", "condition": "固定概率"},
+    {"id": "S3", "probability": "1/25", "description": "传感器3失效", "source": "合成数据（稳定性采样第三快照）", "condition": "固定概率"},
+    {"id": "PWR", "probability": "1/100", "description": "供电失效（与任一传感器失效共因）", "source": "合成数据（稳定性采样第三快照）", "condition": "固定概率"}
+  ],
+  "gates": [
+    {"id": "G_VOTE", "type": "VOTE", "vote_k": 2, "inputs": ["S1", "S2", "S3"], "description": "三取二冗余"},
+    {"id": "TOP", "type": "OR", "inputs": ["G_VOTE", "PWR"], "description": "T = (2/3 传感器表决失效) OR 供电失效"}
+  ]
+}

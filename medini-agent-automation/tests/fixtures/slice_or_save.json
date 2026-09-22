@@ -1,0 +1,13 @@
+{
+  "schema": "static-fta",
+  "version": "0.1.0",
+  "name": "slice_or_save",
+  "top_gate_id": "TOP",
+  "events": [
+    {"id": "A", "probability": "1/10", "description": "基本事件A", "source": "合成数据", "condition": "固定概率"},
+    {"id": "B", "probability": "1/5", "description": "基本事件B", "source": "合成数据", "condition": "固定概率"}
+  ],
+  "gates": [
+    {"id": "TOP", "type": "OR", "inputs": ["A", "B"], "description": "A OR B（保存重开链路用）"}
+  ]
+}

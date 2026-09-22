@@ -1,0 +1,662 @@
+"""cli — medini-automation 命令行入口。
+
+子命令：doctor / capabilities / validate / dry-run / run / readback
+纪律：未实现动作返回明确错误码 2 与说明，禁止 success 占位。
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import secrets
+import shutil
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+from ..domain.model import ContractError, from_contract_json
+from .. import __version__
+
+MEDINI_EXE_DEFAULT = Path(r"E:\ANSYS Inc\Medini Analyze 2023 R2\Program\mediniAnalyze.exe")
+
+
+# ---------------------------------------------------------------- doctor
+def cmd_doctor(args: argparse.Namespace) -> int:
+    rows: dict[str, object] = {"adapter_version": __version__}
+
+    # python
+    rows["python"] = sys.version.split()[0]
+
+    # medini exe
+    exe = Path(args.medini_exe) if args.medini_exe else MEDINI_EXE_DEFAULT
+    rows["medini_exe"] = {"path": str(exe), "exists": exe.exists()}
+
+    # license service
+    try:
+        r = subprocess.run(
+            ["sc", "query", "ANSYS, Inc. License Manager"],
+            capture_output=True, text=True, timeout=10)
+        state = "unknown"
+        for line in (r.stdout or "").splitlines():
+            if "STATE" in line:
+                state = line.split(":", 1)[1].strip()
+                break
+        rows["license_service"] = state
+    except Exception as e:
+        rows["license_service"] = f"probe-error: {e}"
+
+    # license port 1055
+    s = socket.socket()
+    s.settimeout(2)
+    try:
+        s.connect(("localhost", 1055))
+        rows["license_port_1055"] = "open"
+    except OSError:
+        rows["license_port_1055"] = "closed"
+    finally:
+        s.close()
+
+    # workspace / project (headless 通道依赖)
+    from ..adapters.medini_cli import (
+        DEFAULT_PROJECT, DEFAULT_WORKSPACE, WORKCOPY_PROJECT_DEFAULT,
+    )
+    rows["headless_workspace"] = {
+        "path": str(DEFAULT_WORKSPACE), "exists": DEFAULT_WORKSPACE.exists()}
+    rows["headless_project"] = {
+        "path": str(DEFAULT_PROJECT), "exists": DEFAULT_PROJECT.exists()}
+    rows["workcopy_project"] = {
+        "path": str(WORKCOPY_PROJECT_DEFAULT),
+        "exists": WORKCOPY_PROJECT_DEFAULT.exists(),
+        "note": "P1 保存/重开专用工作副本（不更新既有工程）"}
+
+    # git
+    git = shutil.which("git")
+    rows["git"] = git or "not-found"
+
+    overall = "READY" if (
+        exe.exists() and rows["license_port_1055"] == "open") else "BLOCKED"
+    rows["overall"] = overall
+    if overall == "BLOCKED":
+        rows["blocked_reason"] = (
+            "实机通道不可用。若许可服务 STOPPED：需管理员 PowerShell 执行 "
+            "Start-Service 'ANSYS, Inc. License Manager'（用户态 sc start 已验证 rc=5）。"
+            "其余子命令（validate/dry-run/capabilities）不受影响。")
+
+    print(json.dumps(rows, ensure_ascii=False, indent=2))
+    return 0 if overall == "READY" else 1
+
+
+# ---------------------------------------------------------- capabilities
+def cmd_capabilities(args: argparse.Namespace) -> int:
+    """能力矩阵 + worker 自检（与 MCP 工具 medini_get_capabilities 同一实现）。
+
+    历史版本只回矩阵；现委托 ``application.agent_api.get_capabilities``，
+    输出为其超集（新增 status / worker_env / projects），不再维护第二份形状。
+    """
+    from ..application.agent_api import get_capabilities
+    res = get_capabilities(worker_id=getattr(args, "worker_id", None),
+                           required_version=getattr(args, "required_version", None))
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return _exit_for(res)
+
+
+def _exit_for(res: dict) -> int:
+    """agent_api 的 {ok, blocked, error} → 退出码 0 / 1 / 3。"""
+    return {"ok": 0, "blocked": 1}.get(str(res.get("status")), 3)
+
+
+# ---------------------------------------------------------------- validate
+def cmd_validate(args: argparse.Namespace) -> int:
+    p = Path(args.contract)
+    if not p.exists():
+        print(json.dumps({"ok": False, "error": f"FILE_NOT_FOUND: {p}"}),
+              file=sys.stderr)
+        return 2
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        ft = from_contract_json(data)
+        print(json.dumps({
+            "ok": True, "name": ft.name,
+            "events": len(ft.events), "gates": len(ft.gates),
+            "semantic_model_hash": ft.semantic_hash(),
+        }, ensure_ascii=False, indent=2))
+        return 0
+    except ContractError as e:
+        print(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False))
+        return 1
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"},
+                         ensure_ascii=False), file=sys.stderr)
+        return 2
+
+
+# ------------------------------------------------------------- dry-run/run
+def cmd_slice(args: argparse.Namespace, execute: bool) -> int:
+    from ..application.slice import run_slice
+    contract = Path(args.contract)
+    if not contract.exists():
+        print(json.dumps({"error": f"FILE_NOT_FOUND: {contract}"}),
+              file=sys.stderr)
+        return 2
+    out_root = Path(args.out)
+    res = run_slice(
+        contract, out_root, case=args.case, k_max=args.k_max,
+        execute=execute)
+    payload = {
+        "case": res.case, "mode": res.mode, "verdict": res.verdict,
+        "verdict_detail": res.verdict_detail,
+        "semantic_model_hash": res.semantic_hash,
+        "reference_Q": res.reference_q,
+        "reference_MCS": res.reference_mcs,
+        "xml": res.xml_path, "evidence_dir": res.evidence_dir,
+        "job_id": res.job_id,
+    }
+    if res.medini:
+        payload["medini_Q_top"] = res.medini.get("Q_top")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    if res.verdict == "pass":
+        return 0
+    if res.verdict == "blocked":
+        return 1
+    return 3  # fail / error
+
+
+# ---------------------------------------------------------------- readback
+def cmd_readback(args: argparse.Namespace) -> int:
+    """读取证据包 manifest + 参考值 + 实机结果并汇总三方对照。"""
+    ev = Path(args.evidence)
+    manifest_p = ev / "manifest.json"
+    if not manifest_p.exists():
+        print(json.dumps({"error": f"MANIFEST_NOT_FOUND: {manifest_p}"}),
+              file=sys.stderr)
+        return 2
+    manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
+    ref_p = ev / "verification" / "reference.json"
+    medini_p = ev / "results" / "medini-actual.json"
+    out = {"manifest": manifest, "reference": None, "medini": None}
+    if ref_p.exists():
+        out["reference"] = json.loads(ref_p.read_text(encoding="utf-8"))
+    if medini_p.exists():
+        out["medini"] = json.loads(medini_p.read_text(encoding="utf-8"))
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return 0
+
+
+# ------------------------------------------------------------ reopen-check
+def cmd_reopen_check(args: argparse.Namespace) -> int:
+    """P1：保存 → 重开 → 回读链（两阶段独立进程）。"""
+    from ..application.persistence import run_reopen_check
+    contract = Path(args.contract)
+    if not contract.exists():
+        print(json.dumps({"error": f"FILE_NOT_FOUND: {contract}"}),
+              file=sys.stderr)
+        return 2
+    res = run_reopen_check(
+        contract, Path(args.out), case=args.case, k_max=args.k_max,
+        execute=not args.dry, publish=args.publish)
+    payload = {
+        "case": res.case, "mode": res.mode, "verdict": res.verdict,
+        "verdict_detail": res.verdict_detail,
+        "reference_Q": res.reference_q,
+        "checks": res.checks,
+        "saved_fta": res.saved_fta,
+        "publish": res.publish,
+        "evidence_dir": res.evidence_dir, "job_id": res.job_id,
+    }
+    if res.save:
+        payload["phaseA"] = {k: res.save.get(k) for k in
+                             ("status", "Q0", "semantic_digest",
+                              "saved_size", "saved_sha256", "error")}
+    if res.reopen:
+        payload["phaseB"] = {k: res.reopen.get(k) for k in
+                             ("status", "Q1", "semantic_digest",
+                              "loaded_size", "loaded_sha256", "error")}
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    if res.verdict == "pass":
+        return 0
+    if res.verdict == "blocked":
+        return 1
+    return 3  # fail / error
+
+
+# --------------------------------------------------------- publish-diagram
+def cmd_publish_diagram(args: argparse.Namespace) -> int:
+    """P1.5：为落盘 .fta 生成 .fta_diagram 并登记进 .project.medini。"""
+    from ..application.visibility import publish_diagram
+    res = publish_diagram(args.fta, project_dir=args.project, case=args.case,
+                          register=not args.no_register)
+    payload = {
+        "case": res.case, "slug": res.slug, "ok": res.ok,
+        "fta": res.fta_path, "diagram": res.diagram_path,
+        "diagram_sha256": res.diagram_sha256,
+        "counts": res.counts, "bbox": res.bbox,
+        "registration": (None if res.registration is None
+                         else {"action": res.registration.action,
+                               "project_file": res.registration.project_file}),
+        "errors": res.errors,
+        "notes": res.notes,
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if res.ok else 2
+
+
+# --------------------------------------------------------------- visibility
+def cmd_visibility(args: argparse.Namespace) -> int:
+    """审计工程的 GUI 可见性：哪些 .fta 已在工程树里、哪些是孤儿。"""
+    from ..application.visibility import list_orphans
+    report = list_orphans(args.project)
+    payload = {
+        "project": str(Path(args.project)),
+        "registered_count": len(report["registered"]),
+        "unregistered_count": len(report["unregistered"]),
+        "registered": report["registered"],
+        "unregistered": report["unregistered"],
+        "note": "unregistered = 有 .fta 但未登记 PJDiagram，在 GUI 项目树中不可见；"
+                "用 publish-diagram 发布",
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if not report["unregistered"] else 1
+
+
+# ---------------------------------------------------------- verify-diagram
+def cmd_verify_diagram(args: argparse.Namespace) -> int:
+    """P1.5 实机校验：在 medini 里加载 .fta_diagram，核对结构与引用解析。"""
+    from ..application.visibility import verify_diagram
+    res = verify_diagram(args.case, project_dir=args.project, out_root=args.out)
+    payload = {k: res.get(k) for k in
+               ("case", "status", "verdict", "checks", "failed_checks",
+                "expect_nodes", "expect_edges")}
+    raw = res.get("raw") or {}
+    payload["observed"] = {k: raw.get(k) for k in
+                           ("children_total", "children_proxy", "edges_total",
+                            "edges_proxy", "top_element_type", "diagram_etype")}
+    if res.get("error"):
+        payload["error"] = res["error"]
+    if res.get("diagnosis"):
+        payload["diagnosis"] = res["diagnosis"]
+    if res.get("stdout_tail"):
+        payload["stdout_tail"] = res["stdout_tail"]
+    if res.get("log_tail"):
+        payload["log_tail"] = res["log_tail"]
+    if res.get("out_json"):
+        payload["evidence_dir"] = str(Path(res["out_json"]).parent)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    v = res.get("verdict")
+    return 0 if v == "pass" else (1 if v == "blocked" else 3)
+
+
+# ------------------------------------------------------- P2 受控操作接口
+# 以下四个子命令与 MCP 工具一一对应（read_project / prepare_change /
+# apply_change / export_evidence），实现层都是 application.agent_api，
+# 规划要求「先形成可脚本调用 CLI/服务，再封装工具，不重写 Harness」。
+def cmd_read_project(args: argparse.Namespace) -> int:
+    from ..application.agent_api import read_project
+    res = read_project(args.project, case=args.case)
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return _exit_for(res)
+
+
+def _load_json_arg(inline: str | None, path: str | None, what: str) -> object:
+    if path:
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"{what}: {p} 不存在")
+        return json.loads(p.read_text(encoding="utf-8"))
+    if inline:
+        return json.loads(inline)
+    raise ValueError(f"{what}: 需要 --{what} 或 --{what}-file")
+
+
+def cmd_prepare_change(args: argparse.Namespace) -> int:
+    from ..application.agent_api import prepare_change
+    try:
+        ops = _load_json_arg(args.ops, args.ops_file, "ops")
+    except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:
+        print(json.dumps({"status": "error", "code": "BAD_OPS_ARG",
+                          "error": str(e)}, ensure_ascii=False), file=sys.stderr)
+        return 2
+    if not isinstance(ops, list):
+        print(json.dumps({"status": "error", "code": "BAD_OPS_ARG",
+                          "error": "--ops 必须是 JSON 数组"},
+                         ensure_ascii=False), file=sys.stderr)
+        return 2
+    res = prepare_change(
+        args.project, args.case, ops,
+        expected_baseline_hash=args.baseline_hash,
+        contract_path=args.contract, reason=args.reason, source=args.source,
+        evidence_refs=args.evidence_ref or None)
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return _exit_for(res)
+
+
+def cmd_apply_change(args: argparse.Namespace) -> int:
+    """实施已批准变更。
+
+    审批只接受 JSON（或 JSON 文件），**不提供** --approver/--fingerprint 这类
+    便利开关——那会让「Agent 自批」变得太容易。审批必须来自受信任审批面板的签名。
+
+    省略审批参数是**合法**的：幂等命中时（重发同一请求）会直接返回首次结果。
+    这是一个真实的用法——"上次那笔到底写没写进去？"用同一幂等键问一次即可。
+    """
+    from ..application.agent_api import apply_change
+    approval = None
+    if args.approval or args.approval_file:
+        try:
+            approval = _load_json_arg(args.approval, args.approval_file, "approval")
+        except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:
+            print(json.dumps({"status": "error", "code": "BAD_APPROVAL_ARG",
+                              "error": str(e)}, ensure_ascii=False), file=sys.stderr)
+            return 2
+        if not isinstance(approval, dict):
+            print(json.dumps({"status": "error", "code": "BAD_APPROVAL_ARG",
+                              "error": "--approval 必须是 JSON 对象"},
+                             ensure_ascii=False), file=sys.stderr)
+            return 2
+    res = apply_change(args.change_id, approval=approval,
+                       idempotency_key=args.idempotency_key)
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return _exit_for(res)
+
+
+def cmd_export_evidence(args: argparse.Namespace) -> int:
+    from ..application.agent_api import export_evidence
+    res = export_evidence(args.job_id, out_root=Path(args.out) if args.out else None)
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return _exit_for(res)
+
+
+# ============================================== P3 审批面板（受信任侧）
+def cmd_key_init(args: argparse.Namespace) -> int:
+    """生成审批面板的 Ed25519 密钥对。
+
+    私钥落在**仓库外**（默认 ``~/.medini-approval``），公钥**不自动写进信任根**
+    —— 登记授权人必须由人工完成。理由：如果本命令顺手把公钥也登记了，那么能跑
+    CLI 的 Agent 就能一键把自己变成合法审批人，"服务端校验授权人"立刻归零。
+    """
+    from ..domain import ed25519 as ED
+    from ..domain.approval import approval_home, trust_path
+
+    home = Path(args.home) if args.home else approval_home()
+    home.mkdir(parents=True, exist_ok=True)
+    key = home / f"{args.identity}.key"
+    if key.exists() and not args.force:
+        print(json.dumps(
+            {"status": "error", "code": "KEY_EXISTS", "error": f"{key} 已存在",
+             "hint": "换 --identity，或加 --force 覆盖（会作废该身份已签发的批准）"},
+            ensure_ascii=False), file=sys.stderr)
+        return 2
+
+    seed = secrets.token_bytes(32)
+    fd = os.open(key, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (seed.hex() + "\n").encode("ascii"))
+    finally:
+        os.close(fd)
+    pub = ED.public_key(seed).hex()
+    perms = args.permission or ["model_write"]
+    tp = trust_path()
+    print(json.dumps({
+        "status": "ok", "identity": args.identity,
+        "key_file": str(key), "public_key": pub,
+        "trust_root": str(tp), "trust_root_exists": tp.exists(),
+        "permissions": perms,
+        "next_action": (
+            f"**人工**把下面这行填进 {tp} 的 approvers 数组（本命令不会代劳）："
+            + json.dumps({"identity": args.identity, "public_key": pub,
+                          "permissions": perms}, ensure_ascii=False)),
+        "warning": (
+            "私钥不加密，保护强度等于所在目录的访问控制。默认放仓库外，"
+            "正是为了让 Agent 无从自签 —— 别把它提交进版本库或复制到工作目录。"),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_approve(args: argparse.Namespace) -> int:
+    """用审批面板的私钥签发一份审批凭证（这是"受信任人机界面"侧的动作）。"""
+    from ..application.agent_api import _change_path
+    from ..domain.approval import PERMISSIONS, ApprovalContext, issue_attestation
+
+    keyf = Path(args.key_file)
+    if not keyf.exists():
+        print(json.dumps(
+            {"status": "error", "code": "KEY_NOT_FOUND",
+             "error": f"私钥文件不存在: {keyf}",
+             "hint": "先 cli key-init 生成，或 --key-file 指向已有私钥"},
+            ensure_ascii=False), file=sys.stderr)
+        return 2
+    try:
+        seed = bytes.fromhex(keyf.read_text(encoding="utf-8").strip())
+        if len(seed) != 32:
+            raise ValueError(f"seed 长度 {len(seed)} != 32")
+    except (ValueError, OSError) as exc:
+        print(json.dumps(
+            {"status": "error", "code": "BAD_KEY",
+             "error": f"{keyf} 不是合法的 Ed25519 seed（32 字节 hex）: {exc}"},
+            ensure_ascii=False), file=sys.stderr)
+        return 2
+
+    cpath = _change_path(args.change_id)
+    if not cpath.exists():
+        print(json.dumps(
+            {"status": "error", "code": "CHANGE_NOT_FOUND",
+             "error": f"变更单不存在: {cpath}",
+             "hint": "change_id 由 cli prepare-change 返回"},
+            ensure_ascii=False), file=sys.stderr)
+        return 2
+    blob = json.loads(cpath.read_text(encoding="utf-8"))
+
+    approver = args.approver or keyf.stem
+    if args.permission and args.permission not in PERMISSIONS:
+        print(json.dumps(
+            {"status": "error", "code": "BAD_PERMISSION",
+             "error": f"未知权限 {args.permission!r}",
+             "hint": f"合法值 {list(PERMISSIONS)}"}, ensure_ascii=False),
+            file=sys.stderr)
+        return 2
+
+    ctx = ApprovalContext(
+        change_id=args.change_id, project_id=blob["project_id"],
+        patch_hash=blob["patch_hash"],
+        expected_baseline_hash=blob["expected_baseline_hash"],
+        required_permission=blob.get("required_permission", "model_write"))
+    att = issue_attestation(
+        seed=seed, approver=approver, context=ctx,
+        permission=args.permission, validity_seconds=args.validity,
+        credential_fingerprint=args.credential_fingerprint or "")
+
+    text = json.dumps(att, ensure_ascii=False, indent=2)
+    if args.out:
+        outp = Path(args.out)
+        outp.parent.mkdir(parents=True, exist_ok=True)
+        outp.write_text(text + "\n", encoding="utf-8")
+        print(json.dumps({
+            "status": "ok", "written": str(outp.resolve()),
+            "change_id": args.change_id, "approver": approver,
+            "scope": att["scope"], "permission": att["permission"],
+            "expires_at": att["expires_at"], "nonce": att["nonce"],
+            "patch_hash": att["patch_hash"][:16] + "…",
+            "next_action": f"cli apply-change {args.change_id} "
+                           f"--approval-file {outp}",
+        }, ensure_ascii=False, indent=2))
+    else:
+        print(text)
+    return 0
+
+
+def cmd_trust(args: argparse.Namespace) -> int:
+    """显示信任根状态 —— 尤其是"为什么所有审批都被拒"。"""
+    from ..domain import ed25519 as ED
+    from ..domain.approval import load_trust_root, trust_path
+
+    tp = Path(args.home) / "trust.json" if args.home else trust_path()
+    root = load_trust_root(tp)
+    out: dict[str, object] = {
+        "path": str(tp), "exists": tp.exists(), "source": root.source,
+        "max_validity_seconds": root.max_validity_seconds,
+        "ed25519_selfcheck": ED.ed25519_available(),
+        "approvers": [
+            {"identity": e.identity, "public_key": e.public_key,
+             "permissions": list(e.permissions), "note": e.note}
+            for e in sorted(root.entries.values(), key=lambda x: x.identity)],
+    }
+    if root.entries:
+        out["status"] = "ok"
+        out["behaviour"] = "审批按签名凭证校验：授权人 / 权限 / 范围 / 有效期 / 一次性"
+    else:
+        out["status"] = "blocked"
+        out["code"] = "TRUST_ROOT_MISSING"
+        out["behaviour"] = "fail-closed：当前一切 apply_change 都会被拒"
+        out["hint"] = ("先 cli key-init --identity <姓名> 生成密钥，"
+                       "再由人工把公钥登记进 trust.json（见其输出）")
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return 0 if root.entries else 1
+
+
+# ------------------------------------------------------------------- main
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(
+        prog="medini-automation",
+        description="A线 medini-agent-automation CLI")
+    ap.add_argument("--version", action="version", version=__version__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    d = sub.add_parser("doctor", help="环境自检（medini/许可/依赖）")
+    d.add_argument("--medini-exe", default=None)
+    d.set_defaults(func=cmd_doctor)
+
+    c = sub.add_parser("capabilities",
+                       help="能力矩阵 + worker 自检（= MCP medini_get_capabilities）")
+    c.add_argument("--worker-id", default=None)
+    c.add_argument("--required-version", default=None,
+                   help="逐项标注 version_match（不匹配=未在本机实测）")
+    c.set_defaults(func=cmd_capabilities)
+
+    v = sub.add_parser("validate", help="校验契约 JSON（静态FTA）")
+    v.add_argument("contract")
+    v.set_defaults(func=cmd_validate)
+
+    dr = sub.add_parser("dry-run", help="生成 XML+参考值+证据包（不实机）")
+    dr.add_argument("contract")
+    dr.add_argument("--out", default="runs")
+    dr.add_argument("--case", default=None)
+    dr.add_argument("--k", type=int, default=6, dest="k_max")
+    dr.set_defaults(func=lambda a: cmd_slice(a, execute=False))
+
+    r = sub.add_parser("run", help="实机执行（许可可用时）")
+    r.add_argument("contract")
+    r.add_argument("--out", default="runs")
+    r.add_argument("--case", default=None)
+    r.add_argument("--k", type=int, default=6, dest="k_max")
+    r.set_defaults(func=lambda a: cmd_slice(a, execute=True))
+
+    rb = sub.add_parser("readback", help="汇总证据包三方对照")
+    rb.add_argument("evidence")
+    rb.set_defaults(func=cmd_readback)
+
+    rc = sub.add_parser("reopen-check",
+                        help="P1：保存.fta→新进程重开→回读语义/重算Q 四重校核")
+    rc.add_argument("contract")
+    rc.add_argument("--out", default="runs")
+    rc.add_argument("--case", default=None)
+    rc.add_argument("--k", type=int, default=6, dest="k_max")
+    rc.add_argument("--dry", action="store_true", help="只生成工件，不跑实机")
+    rc.add_argument("--publish", action="store_true",
+                    help="P1.5：保存成功后自动生成 .fta_diagram 并登记进工程")
+    rc.set_defaults(func=cmd_reopen_check)
+
+    pd = sub.add_parser("publish-diagram",
+                        help="P1.5：生成 .fta_diagram + 登记 .project.medini（GUI 可见）")
+    pd.add_argument("project", help="medini 工程目录（含 .project.medini）")
+    pd.add_argument("--case", required=True, help="案例名（决定 .fta/.fta_diagram 文件名）")
+    pd.add_argument("--fta", default=None, help=".fta 路径，默认 <project>/fta/<case>.fta")
+    pd.add_argument("--no-register", action="store_true",
+                    help="只生成图文件，不改 .project.medini")
+    pd.set_defaults(func=cmd_publish_diagram)
+
+    vis = sub.add_parser("visibility",
+                         help="审计工程 GUI 可见性（列出未登记的孤儿 .fta）")
+    vis.add_argument("project")
+    vis.set_defaults(func=cmd_visibility)
+
+    vd = sub.add_parser("verify-diagram",
+                        help="P1.5：实机校验 .fta_diagram 可加载/结构/引用解析")
+    vd.add_argument("project")
+    vd.add_argument("--case", required=True)
+    vd.add_argument("--out", default="runs")
+    vd.set_defaults(func=cmd_verify_diagram)
+
+    rp = sub.add_parser("read-project",
+                        help="P2 只读快照：原生结构 + 基线 + ID 映射 + 映射损失")
+    rp.add_argument("project", help="受控 project_id（见 capabilities 的 projects）")
+    rp.add_argument("--case", default=None)
+    rp.set_defaults(func=cmd_read_project)
+
+    pc = sub.add_parser("prepare-change",
+                        help="P2 变更提案：校验 + diff + patch_hash（不写工程）")
+    pc.add_argument("project")
+    pc.add_argument("case")
+    pc.add_argument("--ops", default=None, help="操作数组 JSON")
+    pc.add_argument("--ops-file", default=None, help="操作数组 JSON 文件")
+    pc.add_argument("--baseline-hash", default=None,
+                    help="绑定的基线哈希；首次建立基线时省略")
+    pc.add_argument("--contract", default=None,
+                    help="建立初始基线用的契约 JSON（仅首次需要）")
+    pc.add_argument("--reason", default="")
+    pc.add_argument("--source", default="")
+    pc.add_argument("--evidence-ref", action="append", default=None)
+    pc.set_defaults(func=cmd_prepare_change)
+
+    ac = sub.add_parser("apply-change",
+                        help="P3 在副本实施已批准变更（只认受信任审批面板的签名凭证）")
+    ac.add_argument("change_id")
+    ac.add_argument("--approval", default=None, help="审批凭证 JSON")
+    ac.add_argument("--approval-file", default=None, help="审批凭证 JSON 文件")
+    ac.add_argument("--idempotency-key", default=None,
+                    help="幂等键；默认用变更单里的键（同键同载荷→返回既有结果）")
+    ac.set_defaults(func=cmd_apply_change)
+
+    ee = sub.add_parser("export-evidence",
+                        help="P2 导出已校核作业的证据包（文件清单 + 逐文件哈希）")
+    ee.add_argument("job_id")
+    ee.add_argument("--out", default="runs")
+    ee.set_defaults(func=cmd_export_evidence)
+
+    ki = sub.add_parser("key-init",
+                        help="P3 生成审批面板 Ed25519 密钥对（私钥落仓库外）")
+    ki.add_argument("--identity", required=True, help="授权人标识（工号/姓名）")
+    ki.add_argument("--home", default=None,
+                    help="密钥目录；默认 $MEDINI_APPROVAL_HOME 或 ~/.medini-approval")
+    ki.add_argument("--permission", action="append", default=None,
+                    help="角色权限，可重复；默认 model_write")
+    ki.add_argument("--force", action="store_true", help="覆盖已存在的私钥")
+    ki.set_defaults(func=cmd_key_init)
+
+    apv = sub.add_parser("approve",
+                         help="P3 用私钥签发审批凭证（受信任审批面板侧动作）")
+    apv.add_argument("change_id")
+    apv.add_argument("--key-file", required=True, help="Ed25519 seed 文件（hex）")
+    apv.add_argument("--approver", default=None,
+                     help="授权人标识；默认取私钥文件名")
+    apv.add_argument("--validity", type=int, default=1800,
+                     help="有效期秒数，默认 1800；上限由信任根 max_validity_seconds 定")
+    apv.add_argument("--permission", default=None)
+    apv.add_argument("--credential-fingerprint", default="")
+    apv.add_argument("--out", default=None, help="凭证输出文件；省略则打 stdout")
+    apv.set_defaults(func=cmd_approve)
+
+    tr = sub.add_parser("trust",
+                        help="P3 显示信任根状态（授权人 / 权限 / 上限）")
+    tr.add_argument("--home", default=None)
+    tr.set_defaults(func=cmd_trust)
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = build_parser()
+    args = ap.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

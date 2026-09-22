@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+runs/
+jobs/
+logs/
+*.medini
+*.mprx
+*.fta
+*.fta_diagram
+# P1 工作副本工程：构建产物，由 scripts/setup-workcopy.py 重建
+workcopy/
