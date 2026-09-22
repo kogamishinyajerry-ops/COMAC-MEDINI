@@ -1,0 +1,57 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+ehthumbs_vista.db
+$RECYCLE.BIN/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# WorkBuddy personal memory / state (per-subdir .workbuddy is fine; top-level is personal)
+.workbuddy/memory/
+.workbuddy/skills/
+.workbuddy/cache/
+.workbuddy/sessions/
+
+# Planning package archives (the unzipped copy is tracked under planning/)
+*.zip
+
+# Duplicate copy of planning package (identical to 开工包/.../v1.0/, see SHA256SUMS)
+/Medini_双项目规划与开工包_v1.0/
+/Medini_双项目规划与开工包_v1.0.zip
+
+# Heavy/build artifacts that should never reach GitHub
+runs/
+evidence/
+workcopy/
+node_modules/
+build/
+dist/
+*.fta
+*.fta_diagram
+*.medini
+*.mprx
+logs/
+*.log
