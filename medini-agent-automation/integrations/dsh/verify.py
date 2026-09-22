@@ -182,10 +182,19 @@ def main() -> int:
         rc = -1
     print(f"server exit={rc}")
     err = proc.stderr.read().decode("utf-8", "replace")  # type: ignore[union-attr]
+    # stdio 传输下 server 不应往 stderr 打协议内容。但第三方库的
+    # DeprecationWarning（如 CI 上未锁版本的 pydantic）不是协议违规——
+    # 把「异常输出」和「无害告警」区分开：只对 traceback / error 级内容判 FAIL。
     if err.strip():
         print(f"stderr({len(err)}B): {err[-800:]}")
+        fatal = [ln for ln in err.splitlines()
+                 if "Traceback" in ln
+                 or ln.strip().startswith("ERROR")
+                 or "Exception" in ln]
+        if fatal:
+            print(f"FAIL stderr 含异常级输出 {len(fatal)} 行"); ok = False
     else:
-        print("stderr: 空（stdio 传输下这是期望行为）")
+        print("stderr: 空")
 
     print("RESULT:", "PASS" if ok and rc == 0 else "FAIL")
     return 0 if ok and rc == 0 else 1

@@ -299,4 +299,8 @@ def test_mcp_server_stdio_smoke():
     assert "RESULT: PASS" in out, out
     assert "tools/list: 9 个" in out, out
     assert "tools/call OK" in out, out
-    assert "stderr: 空" in out, out
+    # stderr 判据是「无异常级输出」，不是「完全无输出」：CI 上未锁版本的
+    # pydantic 等第三方库会往 stderr 打 DeprecationWarning，那不是协议违规。
+    # verify.py 已把 traceback / ERROR / Exception 判为 FAIL，这里只需确认
+    # 它没有报 FAIL 且输出了判定行。
+    assert "FAIL stderr" not in out, out
